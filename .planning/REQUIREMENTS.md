@@ -8,7 +8,7 @@
 ### Input/Output
 
 - [ ] **IO-01**: Read `Content ideas.xlsx` Sheet1 with columns Day, Date, Type, Topic, Description
-- [ ] **IO-02**: Construct `idea_text = f"{Type}. {Topic}. {Description}"` per row
+- [ ] **IO-02**: Construct `idea_text = f"{Type} | {Topic} | {Description}"` per row
 - [ ] **IO-03**: Write enriched Excel with all output columns to specified path
 - [ ] **IO-04**: Normalize dates in output Excel to consistent format
 - [ ] **IO-05**: CLI with `--input` and `--output` flags
