@@ -14,7 +14,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Input Reading** - Parse Excel content calendar into idea structures
 - [x] **Phase 2: Query & API Integration** - Generate search queries and fetch TikTok data via Apify
-- [ ] **Phase 3: Data Processing & Selection** - Score, filter, and select top examples and audio
+- [x] **Phase 3: Data Processing & Selection** - Score, filter, and select top examples and audio
 - [ ] **Phase 4: LLM Enhancement** - Generate creative text with OpenAI
 - [ ] **Phase 5: Output & Packaging** - Write enriched Excel and package as CLI tool
 
@@ -63,7 +63,7 @@ Plans:
 
 Plans:
 - [x] 03-01-PLAN.md -- Normalize, deduplicate, filter, and score TikTok results (process_results pipeline)
-- [ ] 03-02-PLAN.md -- Select top 3 examples and audio with confidence level (enrich_row orchestrator)
+- [x] 03-02-PLAN.md -- Select top 3 examples and audio with confidence level (enrich_row orchestrator)
 
 ### Phase 4: LLM Enhancement
 **Goal**: Generate creative text for audio fit reasoning, hook summaries, and remix ideas
