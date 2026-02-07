@@ -4,10 +4,12 @@ Excel parser for content calendar enrichment.
 Reads Content ideas.xlsx, validates and normalizes data, constructs idea_text.
 """
 import datetime
+import math
 import os
 import sys
 import time
 import json
+from collections import Counter
 from dataclasses import dataclass
 from typing import Tuple, List, Dict, Any, Optional
 from openpyxl import load_workbook
@@ -520,6 +522,109 @@ def enrich_row_queries(idea: ContentIdea) -> Dict[str, Any]:
         "queries": queries,
         "query_count": len(queries)
     }
+
+
+def normalize_result(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Normalize Apify TikTok result to standard schema.
+
+    Maps Apify output schema to our standard video metadata structure.
+    Returns None for malformed results (missing required fields).
+
+    Args:
+        raw: Raw Apify result dictionary
+
+    Returns:
+        Normalized video dict with standard schema, or None if malformed
+    """
+    # Check required fields
+    if not raw.get("id"):
+        return None
+
+    # Build normalized result
+    normalized = {
+        "video_id": raw["id"],
+        "url": raw.get("webVideoUrl", ""),
+        "caption": raw.get("text", ""),
+        "author_username": raw.get("authorMeta", {}).get("name", ""),
+        "create_time": raw.get("createTimeISO", None),
+        "views": raw.get("playCount", 0),
+        "likes": raw.get("diggCount", 0),
+        "comments": raw.get("commentCount", 0),
+        "shares": raw.get("shareCount", 0),
+        "audio": {
+            "audio_id": raw.get("musicMeta", {}).get("musicId", ""),
+            "title": raw.get("musicMeta", {}).get("musicName", ""),
+            "author": raw.get("musicMeta", {}).get("musicAuthor", ""),
+            "url": raw.get("musicMeta", {}).get("playUrl", "")
+        }
+    }
+
+    return normalized
+
+
+def deduplicate_results(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Remove duplicate videos by video_id, keeping first occurrence.
+
+    Args:
+        results: List of normalized video dicts
+
+    Returns:
+        Deduplicated list preserving original order
+    """
+    seen = set()
+    deduped = []
+
+    for result in results:
+        video_id = result.get("video_id")
+        if video_id and video_id not in seen:
+            seen.add(video_id)
+            deduped.append(result)
+
+    return deduped
+
+
+def filter_old_results(results: List[Dict[str, Any]], max_age_days: int = 120) -> List[Dict[str, Any]]:
+    """
+    Filter out videos older than max_age_days.
+
+    Videos with missing or unparseable create_time are KEPT (no false rejection).
+
+    Args:
+        results: List of normalized video dicts
+        max_age_days: Maximum age in days (default 120)
+
+    Returns:
+        Filtered list with only recent videos
+    """
+    filtered = []
+    now = datetime.datetime.now(datetime.timezone.utc)
+
+    for result in results:
+        create_time = result.get("create_time")
+
+        # Keep if create_time is missing or empty
+        if not create_time:
+            filtered.append(result)
+            continue
+
+        # Try to parse and check age
+        try:
+            created_dt = date_parse(create_time)
+            # Ensure timezone-aware
+            if created_dt.tzinfo is None:
+                created_dt = created_dt.replace(tzinfo=datetime.timezone.utc)
+
+            age_days = (now - created_dt).days
+
+            if age_days <= max_age_days:
+                filtered.append(result)
+        except Exception:
+            # Keep on parsing failure (graceful fallback)
+            filtered.append(result)
+
+    return filtered
 
 
 if __name__ == "__main__":
