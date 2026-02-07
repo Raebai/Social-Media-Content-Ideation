@@ -876,33 +876,192 @@ def select_audio(scored_results: List[Dict[str, Any]], examples: List[Dict[str, 
     }
 
 
+def enrich_row(idea: ContentIdea, raw_results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Orchestrate full Phase 3 pipeline for a single content row.
+
+    This is the main Phase 3 entry point that chains together:
+    1. Keyword extraction for relevance scoring
+    2. Result processing (normalize, dedup, filter, score, sort)
+    3. Top example selection
+    4. Audio selection
+
+    Args:
+        idea: ContentIdea to process
+        raw_results: List of raw Apify result dicts from TikTok search
+
+    Returns:
+        Enrichment dict containing row metadata, top 3 examples, selected audio,
+        result counts, and queries used.
+    """
+    # Step 1: Extract keywords for relevance scoring
+    # Reuse keyword extraction logic from generate_queries
+    def extract_keywords(text: str) -> List[str]:
+        words = text.lower().split()
+        stop_words = {'the', 'and', 'for', 'with', 'from', 'this', 'that', 'what', 'when', 'where', 'who', 'how', 'why'}
+        keywords = [w for w in words if len(w) > 3 and w not in stop_words]
+        return keywords
+
+    topic_keywords = extract_keywords(idea.topic)
+    desc_keywords = extract_keywords(idea.description)
+    keywords = topic_keywords + desc_keywords
+
+    # Step 2: Process results (normalize, dedup, filter, score, sort)
+    scored = process_results(raw_results, keywords=keywords)
+
+    # Step 3: Select top 3 examples
+    examples = select_top_examples(scored)
+
+    # Step 4: Select audio
+    audio = select_audio(scored, examples)
+
+    # Step 5: Build and return enrichment dict
+    return {
+        "row_number": idea.row_number,
+        "content_type": idea.content_type,
+        "topic": idea.topic,
+        "examples": examples,
+        "audio": audio,
+        "total_results": len(raw_results),
+        "scored_results": len(scored),
+        "queries": generate_queries(idea)
+    }
+
+
 if __name__ == "__main__":
     ideas, skipped = load_content_ideas("Content ideas.xlsx")
     print_summary(ideas, skipped)
 
-    # Demonstrate Phase 2 pipeline: query generation
+    # Demonstrate Phase 3 pipeline with synthetic data
     print("\n" + "="*60)
-    print("PHASE 2 PIPELINE: Query Generation")
+    print("PHASE 3 PIPELINE: Data Processing & Selection")
     print("="*60 + "\n")
 
-    total_queries = 0
+    # Show queries for first idea
+    if ideas:
+        test_idea = ideas[0]
+        queries = generate_queries(test_idea)
+        print(f"Example: Row {test_idea.row_number} - {test_idea.content_type} | {test_idea.topic}")
+        print(f"Generated {len(queries)} queries: {', '.join(queries)}\n")
 
-    for idea in ideas:
-        enriched = enrich_row_queries(idea)
-        row_num = enriched["row_number"]
-        queries = enriched["queries"]
-        query_count = enriched["query_count"]
+    # Create synthetic TikTok results to demonstrate pipeline
+    print("Demonstrating with synthetic data:\n")
 
-        print(f"Row {row_num}: {idea.content_type} | {idea.topic}")
-        print(f"  Generated {query_count} queries:")
-        for i, query in enumerate(queries, 1):
-            print(f"    {i}. \"{query}\"")
-        print()
+    # Create 5 fake TikTok results with varied engagement and some shared audio
+    fake_results = [
+        {
+            "id": "7001",
+            "webVideoUrl": "https://tiktok.com/@user1/video/7001",
+            "text": "Founder story about building startup from scratch",
+            "authorMeta": {"name": "startup_founder"},
+            "createTimeISO": "2026-01-20T10:00:00Z",
+            "playCount": 150000,
+            "diggCount": 8000,
+            "commentCount": 350,
+            "shareCount": 120,
+            "musicMeta": {
+                "musicId": "audio123",
+                "musicName": "Inspirational Beat",
+                "musicAuthor": "AudioPro",
+                "playUrl": "https://tiktok.com/music/audio123"
+            }
+        },
+        {
+            "id": "7002",
+            "webVideoUrl": "https://tiktok.com/@user2/video/7002",
+            "text": "Day in the life entrepreneur routine",
+            "authorMeta": {"name": "daily_creator"},
+            "createTimeISO": "2026-01-25T14:30:00Z",
+            "playCount": 95000,
+            "diggCount": 5200,
+            "commentCount": 180,
+            "shareCount": 65,
+            "musicMeta": {
+                "musicId": "audio123",
+                "musicName": "Inspirational Beat",
+                "musicAuthor": "AudioPro",
+                "playUrl": "https://tiktok.com/music/audio123"
+            }
+        },
+        {
+            "id": "7003",
+            "webVideoUrl": "https://tiktok.com/@user3/video/7003",
+            "text": "Startup lesson learned the hard way",
+            "authorMeta": {"name": "wise_founder"},
+            "createTimeISO": "2026-02-01T09:15:00Z",
+            "playCount": 220000,
+            "diggCount": 12000,
+            "commentCount": 580,
+            "shareCount": 200,
+            "musicMeta": {
+                "musicId": "audio456",
+                "musicName": "Upbeat Vibe",
+                "musicAuthor": "MusicMaker",
+                "playUrl": "https://tiktok.com/music/audio456"
+            }
+        },
+        {
+            "id": "7004",
+            "webVideoUrl": "https://tiktok.com/@user4/video/7004",
+            "text": "Building in public founder journey",
+            "authorMeta": {"name": "transparent_ceo"},
+            "createTimeISO": "2026-01-18T16:45:00Z",
+            "playCount": 68000,
+            "diggCount": 3800,
+            "commentCount": 120,
+            "shareCount": 45,
+            "musicMeta": {
+                "musicId": "audio123",
+                "musicName": "Inspirational Beat",
+                "musicAuthor": "AudioPro",
+                "playUrl": "https://tiktok.com/music/audio123"
+            }
+        },
+        {
+            "id": "7005",
+            "webVideoUrl": "https://tiktok.com/@user5/video/7005",
+            "text": "Entrepreneur mindset shift that changed everything",
+            "authorMeta": {"name": "growth_minded"},
+            "createTimeISO": "2026-01-28T11:20:00Z",
+            "playCount": 42000,
+            "diggCount": 2100,
+            "commentCount": 85,
+            "shareCount": 28,
+            "musicMeta": {
+                "musicId": "audio789",
+                "musicName": "Chill Lofi",
+                "musicAuthor": "LofiBeats",
+                "playUrl": "https://tiktok.com/music/audio789"
+            }
+        }
+    ]
 
-        total_queries += query_count
+    # Process through full pipeline
+    if ideas:
+        test_idea = ideas[0]
+        enriched = enrich_row(test_idea, fake_results)
 
-    print("="*60)
-    print(f"Total queries generated: {total_queries}")
-    print("Average queries per row: {:.1f}".format(total_queries / len(ideas) if ideas else 0))
-    print("\nNote: Set APIFY_TOKEN environment variable to fetch TikTok results")
+        print(f"Processed {enriched['total_results']} raw results")
+        print(f"After filtering/scoring: {enriched['scored_results']} results\n")
+
+        # Show top 3 examples
+        print("Top 3 Examples:")
+        for i, ex in enumerate(enriched['examples'], 1):
+            print(f"  {i}. @{ex['author_username']}")
+            print(f"     Score: {ex['final_score']:.2f}")
+            print(f"     Views: {ex['views']:,} | Likes: {ex['likes']:,} | Comments: {ex['comments']:,}")
+            print(f"     Caption: {ex['caption'][:60]}...")
+            print(f"     URL: {ex['url']}")
+            print()
+
+        # Show selected audio
+        audio = enriched['audio']
+        print("Selected Audio:")
+        print(f"  Title: {audio['audio_title']}")
+        print(f"  Author: {audio['audio_author']}")
+        print(f"  Confidence: {audio['audio_confidence']} (appears in top results)")
+        print(f"  URL: {audio['audio_url']}")
+
+    print("\n" + "="*60)
+    print("Phase 3 pipeline ready. Set APIFY_TOKEN to run with real data.")
     print("="*60)
