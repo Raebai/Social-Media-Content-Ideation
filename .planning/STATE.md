@@ -9,19 +9,19 @@ See: .planning/PROJECT.md (updated 2026-02-06)
 
 ## Current Position
 
-Phase: 2 of 5 (Query & API Integration)
-Plan: 2 of 2 in current phase
-Status: Phase complete — verified ✓
-Last activity: 2026-02-07 — Phase 2 verified, all must-haves passed
+Phase: 3 of 5 (Data Processing & Selection)
+Plan: 1 of 2 in current phase
+Status: In progress
+Last activity: 2026-02-07 — Completed 03-01-PLAN.md
 
 Progress: [████░░░░░░] 40%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 3
-- Average duration: 2.28 min
-- Total execution time: 6.83 min
+- Total plans completed: 4
+- Average duration: 2.22 min
+- Total execution time: 8.88 min
 
 **By Phase:**
 
@@ -29,10 +29,11 @@ Progress: [████░░░░░░] 40%
 |-------|-------|-------|----------|
 | 1. Input Reading | 1 | 2.25 min | 2.25 min |
 | 2. Query & API Integration | 2 | 4.58 min | 2.29 min |
+| 3. Data Processing & Selection | 1 | 2.05 min | 2.05 min |
 
 **Recent Trend:**
-- Last 5 plans: 01-01 (2.25 min), 02-01 (2.40 min), 02-02 (2.18 min)
-- Trend: Consistent velocity ~2.3 min/plan
+- Last 5 plans: 01-01 (2.25 min), 02-01 (2.40 min), 02-02 (2.18 min), 03-01 (2.05 min)
+- Trend: Consistent velocity ~2.2 min/plan, slight improvement
 
 *Updated after each plan completion*
 
@@ -54,6 +55,10 @@ Recent decisions affecting current work:
 | 02-02 | Use synchronous Apify endpoint | Simpler than async polling for batch processing | Cleaner code, adequate performance |
 | 02-02 | Module-level dict for query caching | No need for external cache in single-run model | Zero infrastructure dependency |
 | 02-02 | APIFY_TOKEN environment variable | Standard security practice for credentials | Secure, clear error on missing token |
+| 03-01 | Log10 scale for engagement metrics | Prevents mega-viral outliers from dominating scores | Balanced scoring across view ranges |
+| 03-01 | Keep videos with missing create_time | Avoids false negatives from incomplete Apify data | More robust results, no good examples lost |
+| 03-01 | Relevance boost capped at +0.2 | Prevents keyword stuffing from inflating scores | Meaningful but not dominant relevance factor |
+| 03-01 | Recency boost tiers (14d/30d) | TikTok algorithm favors recent content | Balances recency with quality metrics |
 
 ### Pending Todos
 
@@ -69,6 +74,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-02-07T17:30:00Z
-Stopped at: Phase 2 complete and verified (11/11 must-haves passed)
-Resume file: None - ready for Phase 3 planning
+Last session: 2026-02-07T18:24:00Z
+Stopped at: Completed 03-01-PLAN.md
+Resume file: None
