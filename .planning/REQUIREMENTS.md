@@ -97,15 +97,15 @@
 | IO-03 | Phase 5 | Pending |
 | IO-04 | Phase 5 | Pending |
 | IO-05 | Phase 5 | Pending |
-| QRY-01 | Phase 2 | Pending |
-| QRY-02 | Phase 2 | Pending |
+| QRY-01 | Phase 2 | Complete |
+| QRY-02 | Phase 2 | Complete |
 | QRY-03 | Phase 5 | Pending |
-| API-01 | Phase 2 | Pending |
-| API-02 | Phase 2 | Pending |
-| API-03 | Phase 2 | Pending |
-| API-04 | Phase 2 | Pending |
-| API-05 | Phase 2 | Pending |
-| API-06 | Phase 2 | Pending |
+| API-01 | Phase 2 | Complete |
+| API-02 | Phase 2 | Complete |
+| API-03 | Phase 2 | Complete |
+| API-04 | Phase 2 | Complete |
+| API-05 | Phase 2 | Complete |
+| API-06 | Phase 2 | Complete |
 | DAT-01 | Phase 3 | Pending |
 | DAT-02 | Phase 3 | Pending |
 | DAT-03 | Phase 3 | Pending |
@@ -137,4 +137,4 @@
 
 ---
 *Requirements defined: 2026-02-06*
-*Last updated: 2026-02-07 after Phase 1 completion*
+*Last updated: 2026-02-07 after Phase 2 completion*
