@@ -243,6 +243,110 @@ def print_summary(ideas: List[ContentIdea], skipped: List[Dict[str, Any]]) -> No
             print(f"  Skipped row {skip_info['row_number']}: missing {skip_info['field']}")
 
 
+# Query generation for TikTok search
+TYPE_QUERY_MAP = {
+    "Story": "founder story",
+    "BTS": "day in the life",
+    "Teach": "startup lesson",
+    "Trend": "new chapter",
+    "Breakdown": "mindset shift",
+    "Reflection": "founder reflection",
+    "Depth": "longform reflection"
+}
+
+
+def generate_queries(idea: ContentIdea) -> List[str]:
+    """
+    Generate 3-6 TikTok search queries from a content idea.
+
+    At least one query is a format-specific query from TYPE_QUERY_MAP.
+    All queries are <=5 words.
+
+    Args:
+        idea: ContentIdea to generate queries from
+
+    Returns:
+        List of 3-6 query strings, each <=5 words
+    """
+    queries = []
+
+    # Helper to truncate queries to 5 words
+    def truncate_to_5_words(text: str) -> str:
+        words = text.split()
+        return ' '.join(words[:5]) if len(words) > 5 else text
+
+    # Helper to extract keywords (meaningful words >3 chars)
+    def extract_keywords(text: str) -> List[str]:
+        words = text.lower().split()
+        # Filter out common stop words and short words
+        stop_words = {'the', 'and', 'for', 'with', 'from', 'this', 'that', 'what', 'when', 'where', 'who', 'how', 'why'}
+        keywords = [w for w in words if len(w) > 3 and w not in stop_words]
+        return keywords
+
+    # 1. Format-specific query from TYPE_QUERY_MAP (satisfies QRY-02)
+    format_query = TYPE_QUERY_MAP.get(idea.content_type, "founder content")
+    queries.append(format_query)
+
+    # 2. Extract keywords from topic and description
+    topic_keywords = extract_keywords(idea.topic)
+    desc_keywords = extract_keywords(idea.description)
+
+    # 3. Add topic as query if it's <=5 words
+    if len(idea.topic.split()) <= 5:
+        queries.append(idea.topic.lower())
+
+    # 4. Build keyword combination queries (2-3 keywords)
+    # Try topic keywords first
+    if len(topic_keywords) >= 2:
+        combo = ' '.join(topic_keywords[:3])
+        combo = truncate_to_5_words(combo)
+        queries.append(combo)
+
+    # Try description keywords
+    if len(desc_keywords) >= 2:
+        combo = ' '.join(desc_keywords[:3])
+        combo = truncate_to_5_words(combo)
+        queries.append(combo)
+
+    # 5. Niche query combining content type keyword + top topic keyword
+    type_keyword = idea.content_type.lower()
+    if topic_keywords:
+        niche_query = f"{type_keyword} {topic_keywords[0]}"
+        niche_query = truncate_to_5_words(niche_query)
+        queries.append(niche_query)
+    else:
+        # Fallback: use content type + "startup"
+        queries.append(f"startup {type_keyword}")
+
+    # 6. Cross-pollinate: description keyword + format
+    if desc_keywords:
+        cross_query = f"{desc_keywords[0]} {format_query.split()[0]}"
+        cross_query = truncate_to_5_words(cross_query)
+        queries.append(cross_query)
+
+    # Remove duplicates while preserving order
+    seen = set()
+    unique_queries = []
+    for q in queries:
+        q_normalized = q.lower().strip()
+        if q_normalized not in seen:
+            seen.add(q_normalized)
+            unique_queries.append(q_normalized)
+
+    # Ensure minimum 3 queries with fallbacks
+    fallbacks = ["startup founder content", "entrepreneur tiktok", "business growth tips"]
+    fallback_idx = 0
+    while len(unique_queries) < 3 and fallback_idx < len(fallbacks):
+        fallback = fallbacks[fallback_idx]
+        if fallback not in seen:
+            unique_queries.append(fallback)
+            seen.add(fallback)
+        fallback_idx += 1
+
+    # Return 3-6 queries (trim if we have too many)
+    return unique_queries[:6]
+
+
 if __name__ == "__main__":
     ideas, skipped = load_content_ideas("Content ideas.xlsx")
     print_summary(ideas, skipped)
