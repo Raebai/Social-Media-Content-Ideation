@@ -4,13 +4,28 @@ Excel parser for content calendar enrichment.
 Reads Content ideas.xlsx, validates and normalizes data, constructs idea_text.
 """
 import datetime
+import os
+import sys
+import time
+import json
 from dataclasses import dataclass
 from typing import Tuple, List, Dict, Any, Optional
 from openpyxl import load_workbook
 from dateutil.parser import parse as date_parse
+import requests
 
 
 VALID_TYPES = {"Story", "BTS", "Teach", "Trend", "Breakdown", "Reflection", "Depth"}
+
+# Apify API Configuration
+APIFY_BASE_URL = "https://api.apify.com/v2"
+APIFY_ACTOR_ID = "clockworks~tiktok-scraper"
+MAX_RESULTS_PER_ROW = 150
+RESULTS_PER_QUERY = 25
+MAX_RETRIES = 3
+
+# Query cache to avoid duplicate API calls
+_query_cache: Dict[str, List[Dict]] = {}
 
 
 @dataclass
@@ -345,6 +360,144 @@ def generate_queries(idea: ContentIdea) -> List[str]:
 
     # Return 3-6 queries (trim if we have too many)
     return unique_queries[:6]
+
+
+def _call_with_retry(fn, *args, max_retries=MAX_RETRIES, **kwargs) -> Any:
+    """
+    Call function with exponential backoff retry on failures.
+
+    Args:
+        fn: Function to call
+        *args: Positional arguments for fn
+        max_retries: Maximum number of retry attempts
+        **kwargs: Keyword arguments for fn
+
+    Returns:
+        Result from fn, or empty list on final failure
+    """
+    for attempt in range(max_retries):
+        try:
+            return fn(*args, **kwargs)
+        except (requests.RequestException, ValueError) as e:
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt
+                print(f"Retry {attempt + 1}/{max_retries} after error: {e}", file=sys.stderr)
+                print(f"Waiting {wait_time}s before retry...", file=sys.stderr)
+                time.sleep(wait_time)
+            else:
+                print(f"Failed after {max_retries} attempts: {e}", file=sys.stderr)
+                return []
+
+
+def _run_apify_actor(query: str, token: str, max_items: int = RESULTS_PER_QUERY) -> List[Dict[str, Any]]:
+    """
+    Run Apify TikTok scraper actor for a single query.
+
+    Args:
+        query: Search query string
+        token: Apify API token
+        max_items: Maximum results to fetch per query
+
+    Returns:
+        List of TikTok video result dictionaries
+
+    Raises:
+        requests.RequestException: On API call failures
+        ValueError: On invalid response format
+    """
+    # Build input payload based on discovered schema
+    input_payload = {
+        "searchQueries": [query],
+        "resultsPerPage": max_items,
+        "searchSection": "/video",  # Videos only
+        "searchSorting": "0",  # Most relevant
+        "searchDatePosted": "0"  # All time
+    }
+
+    # Use synchronous endpoint for simplicity
+    url = f"{APIFY_BASE_URL}/acts/{APIFY_ACTOR_ID}/run-sync-get-dataset-items"
+
+    headers = {
+        "Content-Type": "application/json"
+    }
+
+    params = {
+        "token": token
+    }
+
+    response = requests.post(url, json=input_payload, headers=headers, params=params, timeout=300)
+
+    if response.status_code != 200 and response.status_code != 201:
+        raise requests.RequestException(
+            f"Apify API returned status {response.status_code}: {response.text}"
+        )
+
+    try:
+        results = response.json()
+        # Synchronous endpoint returns array directly
+        if isinstance(results, list):
+            return results
+        # Or might be wrapped in a data field
+        elif isinstance(results, dict) and "data" in results:
+            return results["data"]
+        else:
+            return []
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON response from Apify: {e}")
+
+
+def fetch_tiktok_results(queries: List[str], token: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    Fetch TikTok results for multiple queries with caching and result cap.
+
+    Features:
+    - Retry logic: Up to 3 attempts with exponential backoff
+    - Caching: Identical queries within a run return cached results
+    - Result cap: Maximum 150 results per row regardless of query count
+
+    Args:
+        queries: List of search query strings
+        token: Apify API token (defaults to APIFY_TOKEN env var)
+
+    Returns:
+        List of TikTok video result dictionaries, capped at MAX_RESULTS_PER_ROW
+
+    Raises:
+        ValueError: If APIFY_TOKEN not found in environment
+    """
+    # Get token from environment if not provided
+    if token is None:
+        token = os.environ.get("APIFY_TOKEN")
+
+    if not token:
+        raise ValueError("APIFY_TOKEN not found in environment")
+
+    results = []
+
+    for query in queries:
+        # Normalize query for cache key
+        query_normalized = query.lower().strip()
+
+        # Check cache first (API-06)
+        if query_normalized in _query_cache:
+            print(f"Cache hit for query: {query}", file=sys.stderr)
+            results.extend(_query_cache[query_normalized])
+        else:
+            # Call API with retry logic
+            query_results = _call_with_retry(_run_apify_actor, query, token)
+
+            # Store in cache
+            _query_cache[query_normalized] = query_results
+
+            # Add to results
+            results.extend(query_results)
+
+        # Check result cap (API-03)
+        if len(results) >= MAX_RESULTS_PER_ROW:
+            results = results[:MAX_RESULTS_PER_ROW]
+            break
+
+    return results
 
 
 if __name__ == "__main__":
