@@ -59,10 +59,11 @@ Plans:
   3. Tool scores each video using engagement metrics (views, likes, comments) with recency and relevance boosts
   4. Tool selects top 3 videos by final score as examples per row
   5. Tool identifies most common audio among top 20 results with confidence level (high/medium/low)
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 03-01: TBD
+- [ ] 03-01-PLAN.md -- Normalize, deduplicate, filter, and score TikTok results (process_results pipeline)
+- [ ] 03-02-PLAN.md -- Select top 3 examples and audio with confidence level (enrich_row orchestrator)
 
 ### Phase 4: LLM Enhancement
 **Goal**: Generate creative text for audio fit reasoning, hook summaries, and remix ideas
@@ -103,6 +104,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 |-------|----------------|--------|-----------|
 | 1. Input Reading | 1/1 | ✓ Complete | 2026-02-07 |
 | 2. Query & API Integration | 2/2 | ✓ Complete | 2026-02-07 |
-| 3. Data Processing & Selection | 0/0 | Not started | - |
+| 3. Data Processing & Selection | 0/2 | In progress | - |
 | 4. LLM Enhancement | 0/0 | Not started | - |
 | 5. Output & Packaging | 0/0 | Not started | - |
