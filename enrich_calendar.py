@@ -500,6 +500,55 @@ def fetch_tiktok_results(queries: List[str], token: Optional[str] = None) -> Lis
     return results
 
 
+def enrich_row_queries(idea: ContentIdea) -> Dict[str, Any]:
+    """
+    Generate queries for a content idea (Phase 2 pipeline helper).
+
+    This structural helper wires query generation to row context.
+    Phase 3+ will extend this to include TikTok results and analysis.
+
+    Args:
+        idea: ContentIdea to generate queries for
+
+    Returns:
+        Dict with row_number, queries list, and query_count
+    """
+    queries = generate_queries(idea)
+
+    return {
+        "row_number": idea.row_number,
+        "queries": queries,
+        "query_count": len(queries)
+    }
+
+
 if __name__ == "__main__":
     ideas, skipped = load_content_ideas("Content ideas.xlsx")
     print_summary(ideas, skipped)
+
+    # Demonstrate Phase 2 pipeline: query generation
+    print("\n" + "="*60)
+    print("PHASE 2 PIPELINE: Query Generation")
+    print("="*60 + "\n")
+
+    total_queries = 0
+
+    for idea in ideas:
+        enriched = enrich_row_queries(idea)
+        row_num = enriched["row_number"]
+        queries = enriched["queries"]
+        query_count = enriched["query_count"]
+
+        print(f"Row {row_num}: {idea.content_type} | {idea.topic}")
+        print(f"  Generated {query_count} queries:")
+        for i, query in enumerate(queries, 1):
+            print(f"    {i}. \"{query}\"")
+        print()
+
+        total_queries += query_count
+
+    print("="*60)
+    print(f"Total queries generated: {total_queries}")
+    print("Average queries per row: {:.1f}".format(total_queries / len(ideas) if ideas else 0))
+    print("\nNote: Set APIFY_TOKEN environment variable to fetch TikTok results")
+    print("="*60)
