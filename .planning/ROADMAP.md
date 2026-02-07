@@ -12,7 +12,7 @@ This roadmap transforms a bare content calendar into an actionable production sh
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Input Reading** - Parse Excel content calendar into idea structures
+- [x] **Phase 1: Input Reading** - Parse Excel content calendar into idea structures
 - [ ] **Phase 2: Query & API Integration** - Generate search queries and fetch TikTok data via Apify
 - [ ] **Phase 3: Data Processing & Selection** - Score, filter, and select top examples and audio
 - [ ] **Phase 4: LLM Enhancement** - Generate creative text with OpenAI
@@ -31,7 +31,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Plans**: 1 plan
 
 Plans:
-- [ ] 01-01-PLAN.md -- Build Excel parser with ContentIdea dataclass, validation, Unicode normalization, and idea_text construction
+- [x] 01-01-PLAN.md -- Build Excel parser with ContentIdea dataclass, validation, Unicode normalization, and idea_text construction
 
 ### Phase 2: Query & API Integration
 **Goal**: Generate targeted search queries and fetch TikTok results via Apify scraper
@@ -100,7 +100,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Input Reading | 0/1 | Planned | - |
+| 1. Input Reading | 1/1 | ✓ Complete | 2026-02-07 |
 | 2. Query & API Integration | 0/0 | Not started | - |
 | 3. Data Processing & Selection | 0/0 | Not started | - |
 | 4. LLM Enhancement | 0/0 | Not started | - |

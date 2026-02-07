@@ -5,7 +5,7 @@
 See: .planning/PROJECT.md (updated 2026-02-06)
 
 **Core value:** One command transforms a bare content calendar into an actionable production sheet with audio picks, proven examples, and remix ideas.
-**Current focus:** Phase 1 - Input Reading
+**Current focus:** Phase 2 - Query & API Integration
 
 ## Current Position
 
