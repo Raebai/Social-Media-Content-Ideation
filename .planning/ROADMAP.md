@@ -43,10 +43,11 @@ Plans:
   3. Tool fetches 20-30 TikTok results per query via Apify clockworks/tiktok-scraper
   4. Tool enforces hard cap of 150 total results per row
   5. Tool retries failed API calls with exponential backoff and caches successful results
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 02-01: TBD
+- [ ] 02-01-PLAN.md -- Query generation (generate_queries + TYPE_QUERY_MAP) and Apify actor schema discovery
+- [ ] 02-02-PLAN.md -- Apify integration (fetch_tiktok_results with retry, caching, cap) and pipeline wiring
 
 ### Phase 3: Data Processing & Selection
 **Goal**: Transform raw TikTok data into scored, filtered results with top examples and audio
@@ -101,7 +102,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Input Reading | 1/1 | ✓ Complete | 2026-02-07 |
-| 2. Query & API Integration | 0/0 | Not started | - |
+| 2. Query & API Integration | 0/2 | In progress | - |
 | 3. Data Processing & Selection | 0/0 | Not started | - |
 | 4. LLM Enhancement | 0/0 | Not started | - |
 | 5. Output & Packaging | 0/0 | Not started | - |
