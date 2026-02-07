@@ -627,6 +627,113 @@ def filter_old_results(results: List[Dict[str, Any]], max_age_days: int = 120) -
     return filtered
 
 
+def score_video(video: Dict[str, Any], keywords: List[str] = None) -> Dict[str, Any]:
+    """
+    Compute engagement score for a video.
+
+    Scoring formula (DAT-04 to DAT-07):
+    - Base score: log10(views+1)*0.65 + log10(likes+1)*0.25 + log10(comments+1)*0.10
+    - Recency boost: +0.2 for <=14 days, +0.1 for <=30 days, 0 otherwise
+    - Relevance boost: +0.05 per keyword in caption, capped at +0.2
+    - Final score: base + recency_boost + relevance_boost
+
+    Args:
+        video: Normalized video dict
+        keywords: Optional list of keywords for relevance scoring
+
+    Returns:
+        Video dict with added score fields (base_score, recency_boost, relevance_boost, final_score)
+    """
+    # Step 1: Base score (DAT-04)
+    views = video.get("views", 0)
+    likes = video.get("likes", 0)
+    comments = video.get("comments", 0)
+
+    base = (math.log10(views + 1) * 0.65 +
+            math.log10(likes + 1) * 0.25 +
+            math.log10(comments + 1) * 0.10)
+
+    # Step 2: Recency boost (DAT-05)
+    recency_boost = 0.0
+    create_time = video.get("create_time")
+
+    if create_time:
+        try:
+            created_dt = date_parse(create_time)
+            # Ensure timezone-aware
+            if created_dt.tzinfo is None:
+                created_dt = created_dt.replace(tzinfo=datetime.timezone.utc)
+
+            now = datetime.datetime.now(datetime.timezone.utc)
+            days_old = (now - created_dt).days
+
+            if days_old <= 14:
+                recency_boost = 0.2
+            elif days_old <= 30:
+                recency_boost = 0.1
+        except Exception:
+            # On parsing failure, no recency boost
+            pass
+
+    # Step 3: Relevance boost (DAT-06)
+    relevance_boost = 0.0
+
+    if keywords:
+        caption = video.get("caption", "")
+        if caption:
+            caption_lower = caption.lower()
+            overlap_count = sum(1 for kw in keywords if kw.lower() in caption_lower)
+            relevance_boost = min(overlap_count * 0.05, 0.2)
+
+    # Step 4: Final score (DAT-07)
+    final_score = base + recency_boost + relevance_boost
+
+    # Add scores to video dict
+    video["base_score"] = base
+    video["recency_boost"] = recency_boost
+    video["relevance_boost"] = relevance_boost
+    video["final_score"] = final_score
+
+    return video
+
+
+def process_results(raw_results: List[Dict[str, Any]], keywords: List[str] = None) -> List[Dict[str, Any]]:
+    """
+    Process raw Apify results through full pipeline.
+
+    Pipeline:
+    1. Normalize: Convert Apify schema to standard schema
+    2. Deduplicate: Remove duplicate video_ids
+    3. Filter: Remove videos older than 120 days
+    4. Score: Compute engagement scores with optional keyword relevance
+    5. Sort: By final_score descending
+
+    Args:
+        raw_results: List of raw Apify result dicts
+        keywords: Optional list of keywords for relevance scoring
+
+    Returns:
+        Sorted list of scored, normalized video dicts
+    """
+    # Step 1: Normalize (filter out None results)
+    normalized = [normalize_result(r) for r in raw_results]
+    normalized = [n for n in normalized if n is not None]
+
+    # Step 2: Deduplicate
+    deduped = deduplicate_results(normalized)
+
+    # Step 3: Filter old
+    filtered = filter_old_results(deduped)
+
+    # Step 4: Score
+    scored = [score_video(v, keywords) for v in filtered]
+
+    # Step 5: Sort by final_score descending
+    sorted_results = sorted(scored, key=lambda x: x.get("final_score", 0), reverse=True)
+
+    return sorted_results
+
+
 if __name__ == "__main__":
     ideas, skipped = load_content_ideas("Content ideas.xlsx")
     print_summary(ideas, skipped)
