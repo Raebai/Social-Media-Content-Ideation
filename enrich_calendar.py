@@ -734,6 +734,148 @@ def process_results(raw_results: List[Dict[str, Any]], keywords: List[str] = Non
     return sorted_results
 
 
+def select_top_examples(scored_results: List[Dict[str, Any]], count: int = 3) -> List[Dict[str, Any]]:
+    """
+    Select top N videos from scored results as examples.
+
+    Takes already-sorted (descending by final_score) output from process_results
+    and extracts top N videos with relevant metadata for content creation.
+
+    Args:
+        scored_results: Sorted list of scored video dicts from process_results()
+        count: Number of top examples to select (default 3)
+
+    Returns:
+        List of up to 'count' example dicts with url, engagement metrics,
+        author info, caption, audio, and final_score. Returns fewer if less available.
+        Returns empty list if scored_results is empty.
+    """
+    if not scored_results:
+        return []
+
+    examples = []
+    for video in scored_results[:count]:
+        example = {
+            "url": video["url"],
+            "views": video["views"],
+            "likes": video["likes"],
+            "comments": video["comments"],
+            "shares": video["shares"],
+            "author_username": video["author_username"],
+            "create_time": video["create_time"],
+            "caption": video["caption"],
+            "audio_title": video.get("audio", {}).get("title", ""),
+            "final_score": video["final_score"]
+        }
+        examples.append(example)
+
+    return examples
+
+
+def select_audio(scored_results: List[Dict[str, Any]], examples: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Select recommended audio track from top scored results.
+
+    Strategy:
+    1. Count audio_id occurrences among top 20 results
+    2. Select most common audio_id (if any repeats found)
+    3. Fall back to first example's audio if no repeats
+    4. Determine confidence based on occurrence count
+
+    Args:
+        scored_results: Sorted list of scored video dicts from process_results()
+        examples: List of example dicts from select_top_examples()
+
+    Returns:
+        Dict with audio_title, audio_author, audio_id, audio_url, audio_confidence.
+        Confidence levels: "high" (>=3 occurrences), "medium" (2), "low" (1 or fallback).
+        Returns empty strings with "low" confidence if no audio found.
+    """
+    # Step 1: Count audio occurrences in top 20
+    top_20 = scored_results[:20]
+    audio_ids = []
+
+    for video in top_20:
+        audio_id = video.get("audio", {}).get("audio_id", "")
+        if audio_id:  # Skip empty/falsy audio_ids
+            audio_ids.append(audio_id)
+
+    audio_counter = Counter(audio_ids)
+
+    # Step 2: Select audio
+    selected_audio_id = None
+    count = 0
+
+    if audio_counter:
+        # Get most common audio_id
+        selected_audio_id, count = audio_counter.most_common(1)[0]
+
+        # Find first video with this audio_id to get full metadata
+        selected_video = None
+        for video in top_20:
+            if video.get("audio", {}).get("audio_id") == selected_audio_id:
+                selected_video = video
+                break
+
+        if selected_video:
+            audio_title = selected_video.get("audio", {}).get("title", "")
+            audio_author = selected_video.get("audio", {}).get("author", "")
+            audio_url = selected_video.get("audio", {}).get("url", "")
+        else:
+            # Shouldn't happen, but fallback
+            audio_title = ""
+            audio_author = ""
+            audio_url = ""
+    else:
+        # No valid audio_ids in top 20, fall back to example 1
+        if examples and len(examples) > 0:
+            # Find the video in scored_results that matches example 1 URL
+            ex1_url = examples[0].get("url", "")
+            selected_video = None
+            for video in scored_results:
+                if video.get("url") == ex1_url:
+                    selected_video = video
+                    break
+
+            if selected_video:
+                selected_audio_id = selected_video.get("audio", {}).get("audio_id", "")
+                audio_title = selected_video.get("audio", {}).get("title", "")
+                audio_author = selected_video.get("audio", {}).get("author", "")
+                audio_url = selected_video.get("audio", {}).get("url", "")
+                count = 1  # Fallback used
+            else:
+                # Can't find ex1 video
+                selected_audio_id = ""
+                audio_title = ""
+                audio_author = ""
+                audio_url = ""
+                count = 0
+        else:
+            # No examples either
+            selected_audio_id = ""
+            audio_title = ""
+            audio_author = ""
+            audio_url = ""
+            count = 0
+
+    # Step 3: Determine confidence
+    if count >= 3:
+        confidence = "high"
+    elif count == 2:
+        confidence = "medium"
+    else:
+        confidence = "low"
+
+    # Step 4: Build return dict
+    return {
+        "audio_title": audio_title,
+        "audio_author": audio_author,
+        "audio_id": selected_audio_id,
+        "audio_url": audio_url,
+        "audio_confidence": confidence
+    }
+
+
 if __name__ == "__main__":
     ideas, skipped = load_content_ideas("Content ideas.xlsx")
     print_summary(ideas, skipped)
