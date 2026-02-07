@@ -9,29 +9,30 @@ See: .planning/PROJECT.md (updated 2026-02-06)
 
 ## Current Position
 
-Phase: 1 of 5 (Input Reading)
-Plan: 1 of 1 in current phase
-Status: Phase complete
-Last activity: 2026-02-07 — Completed 01-01-PLAN.md
+Phase: 2 of 5 (Query & API Integration)
+Plan: 1 of 2 in current phase
+Status: In progress
+Last activity: 2026-02-07 — Completed 02-01-PLAN.md
 
-Progress: [██░░░░░░░░] 20%
+Progress: [████░░░░░░] 40%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 1
-- Average duration: 2.25 min
-- Total execution time: 2.25 min
+- Total plans completed: 2
+- Average duration: 2.33 min
+- Total execution time: 4.65 min
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 1. Input Reading | 1 | 2.25 min | 2.25 min |
+| 2. Query & API Integration | 1 | 2.40 min | 2.40 min |
 
 **Recent Trend:**
-- Last 5 plans: 01-01 (2.25 min)
-- Trend: Establishing baseline
+- Last 5 plans: 01-01 (2.25 min), 02-01 (2.40 min)
+- Trend: Consistent velocity ~2.3 min/plan
 
 *Updated after each plan completion*
 
@@ -47,6 +48,9 @@ Recent decisions affecting current work:
 | 01-01 | Used openpyxl instead of pandas | Lighter dependency footprint for Excel reading | Faster install, smaller deployment |
 | 01-01 | Case-insensitive Type validation with casing preservation | Handles acronyms like BTS correctly | Robust validation without breaking on edge cases |
 | 01-01 | Preserved original row numbers (1-indexed) | Better debugging and error reporting | Error messages can reference Excel row numbers |
+| 02-01 | Use format-specific queries from TYPE_QUERY_MAP | Ensures content-type alignment for TikTok search | Each idea has at least one query matching its format |
+| 02-01 | 5-word query limit | TikTok search optimization | Queries stay focused and effective |
+| 02-01 | Use searchQueries (not hashtags/profiles) for Apify | Best fit for generated queries | Clean API integration in Plan 02-02 |
 
 ### Pending Todos
 
@@ -62,6 +66,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-02-07T16:54:07Z
-Stopped at: Completed 01-01-PLAN.md (Phase 1 complete)
-Resume file: None - ready for Phase 2 planning
+Last session: 2026-02-07T17:15:05Z
+Stopped at: Completed 02-01-PLAN.md (Query generation and Apify schema discovery)
+Resume file: None - ready for Plan 02-02 (API integration implementation)
