@@ -15,6 +15,7 @@ from typing import Tuple, List, Dict, Any, Optional
 from openpyxl import load_workbook
 from dateutil.parser import parse as date_parse
 import requests
+import openai
 
 
 VALID_TYPES = {"Story", "BTS", "Teach", "Trend", "Breakdown", "Reflection", "Depth"}
@@ -380,7 +381,7 @@ def _call_with_retry(fn, *args, max_retries=MAX_RETRIES, **kwargs) -> Any:
     for attempt in range(max_retries):
         try:
             return fn(*args, **kwargs)
-        except (requests.RequestException, ValueError) as e:
+        except (requests.RequestException, ValueError, openai.APIError) as e:
             if attempt < max_retries - 1:
                 wait_time = 2 ** attempt
                 print(f"Retry {attempt + 1}/{max_retries} after error: {e}", file=sys.stderr)
@@ -876,7 +877,156 @@ def select_audio(scored_results: List[Dict[str, Any]], examples: List[Dict[str, 
     }
 
 
-def enrich_row(idea: ContentIdea, raw_results: List[Dict[str, Any]]) -> Dict[str, Any]:
+def generate_llm_content(idea: ContentIdea, examples: List[Dict[str, Any]], audio: Dict[str, Any], client=None) -> Dict[str, Any]:
+    """
+    Generate LLM content for enrichment: audio_fit_reason, hook_summaries, remix_ideas.
+
+    Uses OpenAI GPT-4o-mini to generate actionable creative text based on:
+    - Content idea (type, topic, description)
+    - Top example videos (caption, engagement, audio)
+    - Selected audio track
+
+    Args:
+        idea: ContentIdea to generate content for
+        examples: List of example video dicts from select_top_examples()
+        audio: Audio dict from select_audio()
+        client: Optional OpenAI client for testing (creates one if None)
+
+    Returns:
+        Dict with audio_fit_reason, ex1_hook_summary, ex2_hook_summary,
+        ex3_hook_summary, remix_ideas. Returns empty strings on API failure.
+    """
+    # Step 1: Client setup
+    if client is None:
+        client = openai.OpenAI()  # Reads OPENAI_API_KEY from env automatically
+
+    # Step 2: Build prompt with brand context and type-specific direction
+    system_message = (
+        "You are a hype coach content strategist for Logara, a startup documenting its founder journey. "
+        "You give energetic, direct, filmable content direction. Respond in valid JSON only."
+    )
+
+    # Build examples section
+    examples_text = ""
+    for i, ex in enumerate(examples, 1):
+        examples_text += f"\nExample {i}:\n"
+        examples_text += f"  - Caption: {ex.get('caption', 'N/A')}\n"
+        examples_text += f"  - Views: {ex.get('views', 0):,} | Likes: {ex.get('likes', 0):,}\n"
+        examples_text += f"  - Author: @{ex.get('author_username', 'unknown')}\n"
+        examples_text += f"  - Audio: {ex.get('audio_title', 'N/A')}\n"
+
+    # Adjust tone based on audio confidence
+    audio_confidence = audio.get('audio_confidence', 'low')
+    if audio_confidence == 'high':
+        audio_instruction = "Use assertive language for audio_fit_reason (e.g., 'Use this track - ...')"
+    else:
+        audio_instruction = "Use suggestive language for audio_fit_reason (e.g., 'Consider this audio, but feel free to pick your own - ...')"
+
+    # Type-specific framing
+    type_framing = {
+        "Teach": "Educational angles - focus on what viewers will learn",
+        "Story": "Narrative arcs - emphasize storytelling structure",
+        "BTS": "Behind-the-scenes framing - show the process/reality",
+        "Trend": "Trending formats - leverage popular patterns",
+        "Breakdown": "Analysis angles - break down concepts clearly",
+        "Reflection": "Personal insight - authentic founder perspective",
+        "Depth": "Longform depth - substantive exploration"
+    }
+    type_hint = type_framing.get(idea.content_type, "Authentic founder content")
+
+    user_message = f"""Content Idea:
+- Type: {idea.content_type}
+- Topic: {idea.topic}
+- Description: {idea.description}
+
+Audio Track:
+- Title: {audio.get('audio_title', 'N/A')}
+- Author: {audio.get('audio_author', 'N/A')}
+- Confidence: {audio_confidence}
+
+Top Examples:{examples_text}
+
+Brand Context:
+- Logara is a startup documenting its founder journey
+- Tone: Hopecore-light (optimistic, authentic, not forced)
+- Type framing: {type_hint}
+
+Instructions:
+1. audio_fit_reason: One sentence about the audio's GENERAL vibe and usage potential (not tied to this specific idea). {audio_instruction}
+2. hook_summaries: For each example, write 2 sentences: (a) what the video did (reference the caption), (b) why it works/what to learn
+3. remix_ideas: 2-3 filmable one-liner bullets tailored to {idea.content_type} format. Concrete actions, not abstract advice.
+
+Return JSON:
+{{
+  "audio_fit_reason": "one sentence",
+  "hook_summaries": ["2 sentences for ex1", "2 sentences for ex2", "2 sentences for ex3"],
+  "remix_ideas": ["bullet 1", "bullet 2", "bullet 3"]
+}}"""
+
+    # Step 3: Define API call function for retry wrapper
+    def make_api_call():
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            response_format={"type": "json_object"},
+            temperature=0.8,
+            max_tokens=500,
+            messages=[
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": user_message}
+            ]
+        )
+        return response
+
+    # Step 4: Call API with retry wrapper
+    try:
+        response = _call_with_retry(make_api_call)
+
+        # If retry failed, response will be []
+        if not response or response == []:
+            return {
+                "audio_fit_reason": "",
+                "ex1_hook_summary": "",
+                "ex2_hook_summary": "",
+                "ex3_hook_summary": "",
+                "remix_ideas": ""
+            }
+
+        # Step 5: Parse response
+        content = response.choices[0].message.content
+        parsed = json.loads(content)
+
+        # Extract fields with defaults
+        audio_fit_reason = parsed.get("audio_fit_reason", "")
+        hook_summaries = parsed.get("hook_summaries", [])
+        remix_ideas_list = parsed.get("remix_ideas", [])
+
+        # Format remix_ideas as bulleted string
+        if remix_ideas_list:
+            remix_ideas = "\n".join(f"- {idea}" for idea in remix_ideas_list)
+        else:
+            remix_ideas = ""
+
+        # Step 6: Return structured dict
+        return {
+            "audio_fit_reason": audio_fit_reason,
+            "ex1_hook_summary": hook_summaries[0] if len(hook_summaries) > 0 else "",
+            "ex2_hook_summary": hook_summaries[1] if len(hook_summaries) > 1 else "",
+            "ex3_hook_summary": hook_summaries[2] if len(hook_summaries) > 2 else "",
+            "remix_ideas": remix_ideas
+        }
+
+    except (json.JSONDecodeError, KeyError, IndexError, AttributeError) as e:
+        print(f"Error parsing LLM response: {e}", file=sys.stderr)
+        return {
+            "audio_fit_reason": "",
+            "ex1_hook_summary": "",
+            "ex2_hook_summary": "",
+            "ex3_hook_summary": "",
+            "remix_ideas": ""
+        }
+
+
+def enrich_row(idea: ContentIdea, raw_results: List[Dict[str, Any]], openai_client=None) -> Dict[str, Any]:
     """
     Orchestrate full Phase 3 pipeline for a single content row.
 
