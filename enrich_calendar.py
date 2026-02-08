@@ -1075,12 +1075,12 @@ def enrich_row(idea: ContentIdea, raw_results: List[Dict[str, Any]], openai_clie
     # Step 4: Select audio
     audio = select_audio(scored, examples)
 
-    # Step 5: Generate LLM content (if we have scored results)
+    # Step 5: Determine enrich_status per LOG-01
     enrich_status = "ok"
     enrich_reason = ""
 
     if len(scored) == 0:
-        # No results - skip LLM call
+        # No results at all - skip LLM call
         llm_content = {
             "audio_fit_reason": "",
             "ex1_hook_summary": "",
@@ -1088,28 +1088,41 @@ def enrich_row(idea: ContentIdea, raw_results: List[Dict[str, Any]], openai_clie
             "ex3_hook_summary": "",
             "remix_ideas": ""
         }
-        enrich_status = "skip"
+        enrich_status = "skipped"
         enrich_reason = "No scored results"
     else:
         # Generate LLM content
         llm_content = generate_llm_content(idea, examples, audio, client=openai_client)
 
         # Check if LLM generation failed (all fields empty)
-        all_empty = all(
+        llm_failed = all(
             llm_content.get(key, "") == ""
             for key in ["audio_fit_reason", "ex1_hook_summary", "ex2_hook_summary",
                        "ex3_hook_summary", "remix_ideas"]
         )
 
-        if all_empty:
+        # Determine status based on LOG-01 criteria
+        has_audio = bool(audio.get("audio_title"))
+        has_enough_examples = len(examples) >= 2
+        reasons = []
+
+        if llm_failed:
+            reasons.append("LLM generation failed")
+        if not has_enough_examples:
+            reasons.append(f"Only {len(examples)} example(s), need >=2")
+        if not has_audio:
+            reasons.append("No audio selected")
+
+        if reasons:
             enrich_status = "partial"
-            enrich_reason = "LLM generation failed"
+            enrich_reason = "; ".join(reasons)
 
     # Step 6: Build and return enrichment dict with LLM fields
     return {
         "row_number": idea.row_number,
         "content_type": idea.content_type,
         "topic": idea.topic,
+        "topic_keywords": topic_keywords,
         "examples": examples,
         "audio": audio,
         "audio_fit_reason": llm_content.get("audio_fit_reason", ""),
