@@ -1306,6 +1306,94 @@ def write_enriched_excel(ideas: List[ContentIdea], enrichments: List[Dict[str, A
     wb.save(output_path)
 
 
+def build_run_log(ideas: List[ContentIdea], enrichments: List[Dict[str, Any]],
+                  input_path: str, output_path: str, start_time: float, end_time: float) -> Dict[str, Any]:
+    """
+    Build complete run log with summary and per-row diagnostics.
+
+    Args:
+        ideas: List of original ContentIdea objects
+        enrichments: List of enrichment dicts from enrich_row()
+        input_path: Path to input Excel file
+        output_path: Path to output Excel file
+        start_time: time.time() at run start
+        end_time: time.time() at run end
+
+    Returns:
+        Dict with run_summary and rows array
+    """
+    # Build run_summary
+    timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    duration_seconds = round(end_time - start_time, 1)
+
+    # Count status values
+    status_counts = {"ok": 0, "partial": 0, "skipped": 0, "error": 0}
+    for enrichment in enrichments:
+        status = enrichment.get("enrich_status", "error")
+        if status in status_counts:
+            status_counts[status] += 1
+        else:
+            status_counts["error"] += 1
+
+    run_summary = {
+        "timestamp": timestamp,
+        "input_file": os.path.basename(input_path),
+        "output_file": os.path.basename(output_path),
+        "total_rows": len(ideas),
+        "status_counts": status_counts,
+        "duration_seconds": duration_seconds
+    }
+
+    # Build rows array
+    rows = []
+    enrichment_map = {e["row_number"]: e for e in enrichments}
+
+    for idea in ideas:
+        enrichment = enrichment_map.get(idea.row_number, {})
+
+        # Extract chosen audio info
+        audio = enrichment.get("audio", {})
+        chosen_audio = {
+            "title": audio.get("audio_title", ""),
+            "confidence": audio.get("audio_confidence", "")
+        }
+
+        # Extract example URLs (up to 3)
+        examples = enrichment.get("examples", [])
+        example_urls = [ex.get("url", "") for ex in examples[:3]]
+
+        row_data = {
+            "row_number": idea.row_number,
+            "content_type": idea.content_type,
+            "topic": idea.topic,
+            "queries": enrichment.get("queries", []),
+            "total_results": enrichment.get("total_results", 0),
+            "scored_results": enrichment.get("scored_results", 0),
+            "chosen_audio": chosen_audio,
+            "example_urls": example_urls,
+            "enrich_status": enrichment.get("enrich_status", "error"),
+            "enrich_reason": enrichment.get("enrich_reason", "")
+        }
+        rows.append(row_data)
+
+    return {
+        "run_summary": run_summary,
+        "rows": rows
+    }
+
+
+def save_run_log(run_log: Dict[str, Any], log_path: str) -> None:
+    """
+    Save run log dict to JSON file.
+
+    Args:
+        run_log: Run log dict from build_run_log()
+        log_path: Path to write JSON file
+    """
+    with open(log_path, 'w', encoding='utf-8') as f:
+        json.dump(run_log, f, indent=2, default=str)
+
+
 if __name__ == "__main__":
     ideas, skipped = load_content_ideas("Content ideas.xlsx")
     print_summary(ideas, skipped)
@@ -1494,5 +1582,45 @@ if __name__ == "__main__":
         print(f"First 5 headers: {headers_read[:5]}")
         print(f"Topic Keywords column exists: {'Topic Keywords' in headers_read}")
         test_wb.close()
+        print("Verification passed!\n")
+
+        # Test build_run_log and save_run_log
+        print("="*60)
+        print("Testing build_run_log and save_run_log functions")
+        print("="*60 + "\n")
+
+        start_test = time.time()
+        time.sleep(0.1)  # Simulate some work
+        end_test = time.time()
+
+        run_log = build_run_log(
+            test_ideas,
+            test_enrichments,
+            "Content ideas.xlsx",
+            "test_output.xlsx",
+            start_test,
+            end_test
+        )
+
+        print(f"Run log structure created:")
+        print(f"  Timestamp: {run_log['run_summary']['timestamp']}")
+        print(f"  Total rows: {run_log['run_summary']['total_rows']}")
+        print(f"  Status counts: {run_log['run_summary']['status_counts']}")
+        print(f"  Duration: {run_log['run_summary']['duration_seconds']}s")
+        print(f"  Rows array length: {len(run_log['rows'])}")
+
+        # Verify status counts add up
+        counts = run_log['run_summary']['status_counts']
+        total = sum(counts.values())
+        print(f"  Status counts sum: {total} (should equal total_rows)")
+
+        # Save to JSON
+        save_run_log(run_log, "test_run_log.json")
+        print("\nCreated test_run_log.json")
+
+        # Verify JSON is valid
+        with open("test_run_log.json", 'r') as f:
+            loaded_log = json.load(f)
+        print(f"JSON validation: {'run_summary' in loaded_log and 'rows' in loaded_log}")
         print("Verification passed!")
     # END TEMPORARY TEST CODE
