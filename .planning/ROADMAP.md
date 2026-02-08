@@ -15,7 +15,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 1: Input Reading** - Parse Excel content calendar into idea structures
 - [x] **Phase 2: Query & API Integration** - Generate search queries and fetch TikTok data via Apify
 - [x] **Phase 3: Data Processing & Selection** - Score, filter, and select top examples and audio
-- [ ] **Phase 4: LLM Enhancement** - Generate creative text with OpenAI
+- [x] **Phase 4: LLM Enhancement** - Generate creative text with OpenAI
 - [ ] **Phase 5: Output & Packaging** - Write enriched Excel and package as CLI tool
 
 ## Phase Details
@@ -77,7 +77,7 @@ Plans:
 **Plans**: 1 plan
 
 Plans:
-- [ ] 04-01-PLAN.md -- OpenAI GPT-4o-mini integration with generate_llm_content function and enrich_row pipeline wiring
+- [x] 04-01-PLAN.md -- OpenAI GPT-4o-mini integration with generate_llm_content function and enrich_row pipeline wiring
 
 ### Phase 5: Output & Packaging
 **Goal**: Write enriched Excel with all columns, implement CLI interface, and package as complete tool
@@ -105,5 +105,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | 1. Input Reading | 1/1 | ✓ Complete | 2026-02-07 |
 | 2. Query & API Integration | 2/2 | ✓ Complete | 2026-02-07 |
 | 3. Data Processing & Selection | 2/2 | ✓ Complete | 2026-02-07 |
-| 4. LLM Enhancement | 0/1 | In progress | - |
+| 4. LLM Enhancement | 1/1 | ✓ Complete | 2026-02-08 |
 | 5. Output & Packaging | 0/0 | Not started | - |
