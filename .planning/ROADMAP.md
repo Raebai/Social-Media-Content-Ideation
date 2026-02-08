@@ -90,20 +90,21 @@ Plans:
   4. Tool tracks enrich_status per row (ok, partial, skipped, error) with reason
   5. Tool produces run_log.json with per-row queries, results count, chosen audio, example URLs
   6. Single enrich_calendar.py file runs end-to-end with requirements.txt dependencies
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 05-01: TBD
+- [ ] 05-01-PLAN.md -- Excel output writer (write_enriched_excel) and run log builder (build_run_log)
+- [ ] 05-02-PLAN.md -- CLI interface with argparse, main loop, and end-to-end wiring
 
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
+Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Input Reading | 1/1 | ✓ Complete | 2026-02-07 |
-| 2. Query & API Integration | 2/2 | ✓ Complete | 2026-02-07 |
-| 3. Data Processing & Selection | 2/2 | ✓ Complete | 2026-02-07 |
-| 4. LLM Enhancement | 1/1 | ✓ Complete | 2026-02-08 |
-| 5. Output & Packaging | 0/0 | Not started | - |
+| 1. Input Reading | 1/1 | Complete | 2026-02-07 |
+| 2. Query & API Integration | 2/2 | Complete | 2026-02-07 |
+| 3. Data Processing & Selection | 2/2 | Complete | 2026-02-07 |
+| 4. LLM Enhancement | 1/1 | Complete | 2026-02-08 |
+| 5. Output & Packaging | 0/2 | In Progress | - |
