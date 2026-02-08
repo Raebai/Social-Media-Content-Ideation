@@ -74,10 +74,10 @@ Plans:
   2. Tool generates hook_summary (1 sentence) for each example (ex1, ex2, ex3)
   3. Tool generates remix_ideas (2-3 bullets) in hopecore + narrative stakes style matching row Type
   4. Tool extracts and writes audio_title for each example
-**Plans**: TBD
+**Plans**: 1 plan
 
 Plans:
-- [ ] 04-01: TBD
+- [ ] 04-01-PLAN.md -- OpenAI GPT-4o-mini integration with generate_llm_content function and enrich_row pipeline wiring
 
 ### Phase 5: Output & Packaging
 **Goal**: Write enriched Excel with all columns, implement CLI interface, and package as complete tool
@@ -105,5 +105,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | 1. Input Reading | 1/1 | ✓ Complete | 2026-02-07 |
 | 2. Query & API Integration | 2/2 | ✓ Complete | 2026-02-07 |
 | 3. Data Processing & Selection | 2/2 | ✓ Complete | 2026-02-07 |
-| 4. LLM Enhancement | 0/0 | Not started | - |
+| 4. LLM Enhancement | 0/1 | In progress | - |
 | 5. Output & Packaging | 0/0 | Not started | - |
