@@ -1,8 +1,13 @@
 """
-Excel parser for content calendar enrichment.
+Content calendar enrichment tool.
 
-Reads Content ideas.xlsx, validates and normalizes data, constructs idea_text.
+Reads a content calendar Excel file, enriches each row with TikTok trends,
+audio recommendations, and AI-generated creative text. Outputs enriched Excel
+and diagnostic run log.
+
+Usage: python enrich_calendar.py --input "Content ideas.xlsx"
 """
+import argparse
 import datetime
 import math
 import os
@@ -1394,233 +1399,133 @@ def save_run_log(run_log: Dict[str, Any], log_path: str) -> None:
         json.dump(run_log, f, indent=2, default=str)
 
 
+def main():
+    """
+    Main CLI entry point for content calendar enrichment.
+    """
+    # Step 1: Parse args
+    parser = argparse.ArgumentParser(
+        description="Enrich a content calendar with TikTok trends, audio picks, and remix ideas."
+    )
+    parser.add_argument("--input", default="Content ideas.xlsx",
+        help="Path to input Excel file (default: Content ideas.xlsx)")
+    parser.add_argument("--output", default=None,
+        help="Path to output Excel file (default: Enriched <input>_YYYY-MM-DD.xlsx)")
+    parser.add_argument("--dry-run", action="store_true",
+        help="Validate input and show what would be processed without making API calls")
+
+    args = parser.parse_args()
+
+    # Step 2: Validate input file exists
+    if not os.path.exists(args.input):
+        print(f"Error: Input file not found: {args.input}", file=sys.stderr)
+        sys.exit(1)
+
+    # Step 3: Environment variable check (skip for --dry-run)
+    if not args.dry_run:
+        missing_vars = []
+        if not os.environ.get("APIFY_TOKEN"):
+            missing_vars.append("APIFY_TOKEN")
+        if not os.environ.get("OPENAI_API_KEY"):
+            missing_vars.append("OPENAI_API_KEY")
+
+        if missing_vars:
+            for var in missing_vars:
+                print(f"Missing environment variable: {var}", file=sys.stderr)
+            sys.exit(1)
+
+    # Step 4: Load content ideas
+    ideas, skipped = load_content_ideas(args.input)
+    print(f"Loaded {len(ideas)} content ideas from {args.input}")
+    if skipped:
+        print(f"Skipped {len(skipped)} rows with missing fields")
+
+    # Step 5: Handle --dry-run
+    if args.dry_run:
+        for idea in ideas:
+            print(f"  Row {idea.row_number}: {idea.content_type} | {idea.topic}")
+        print(f"\nDry run complete. {len(ideas)} rows would be processed.")
+        if skipped:
+            for skip_info in skipped:
+                print(f"  Would skip row {skip_info['row_number']}: missing {skip_info['field']}")
+        sys.exit(0)
+
+    # Step 6: Process rows
+    start_time = time.time()
+    enrichments = []
+    openai_client = openai.OpenAI()  # Create once, reuse for all rows
+
+    for i, idea in enumerate(ideas, 1):
+        try:
+            # Generate queries
+            queries = generate_queries(idea)
+
+            # Fetch TikTok results
+            raw_results = fetch_tiktok_results(queries)
+
+            # Enrich row (process results + select examples + audio + LLM)
+            enriched = enrich_row(idea, raw_results, openai_client=openai_client)
+            enrichments.append(enriched)
+
+            # Progress output
+            status = enriched.get("enrich_status", "ok")
+            print(f"Row {i}/{len(ideas)}: {idea.content_type} | {idea.topic}... {status}")
+
+        except Exception as e:
+            # On per-row failure: log error, continue processing
+            print(f"Row {i}/{len(ideas)}: {idea.content_type} | {idea.topic}... error", file=sys.stderr)
+            print(f"  Error: {e}", file=sys.stderr)
+            enrichments.append({
+                "row_number": idea.row_number,
+                "content_type": idea.content_type,
+                "topic": idea.topic,
+                "topic_keywords": [],
+                "examples": [],
+                "audio": {"audio_title": "", "audio_author": "", "audio_id": "", "audio_url": "", "audio_confidence": "low"},
+                "audio_fit_reason": "",
+                "ex1_hook_summary": "", "ex2_hook_summary": "", "ex3_hook_summary": "",
+                "ex1_audio_title": "", "ex2_audio_title": "", "ex3_audio_title": "",
+                "remix_ideas": "",
+                "enrich_status": "error",
+                "enrich_reason": str(e),
+                "total_results": 0,
+                "scored_results": 0,
+                "queries": []
+            })
+
+    end_time = time.time()
+
+    # Step 7: Compute output path
+    if args.output is None:
+        # Derive from input filename
+        input_dir = os.path.dirname(args.input) or "."
+        input_basename = os.path.basename(args.input)
+        input_name, input_ext = os.path.splitext(input_basename)
+        today_str = datetime.date.today().isoformat()
+        output_filename = f"Enriched {input_name}_{today_str}.xlsx"
+        output_path = os.path.join(input_dir, output_filename)
+    else:
+        output_path = args.output
+
+    # Step 8: Write outputs
+    # Write enriched Excel
+    write_enriched_excel(ideas, enrichments, output_path)
+    print(f"\nEnriched Excel written to: {output_path}")
+
+    # Build and save run log
+    run_log = build_run_log(ideas, enrichments, args.input, output_path, start_time, end_time)
+    log_dir = os.path.dirname(output_path) or "."
+    log_filename = f"run_log_{datetime.date.today().isoformat()}.json"
+    log_path = os.path.join(log_dir, log_filename)
+    save_run_log(run_log, log_path)
+    print(f"Run log written to: {log_path}")
+
+    # Print summary
+    summary = run_log["run_summary"]
+    sc = summary["status_counts"]
+    print(f"\nDone! {summary['total_rows']} rows in {summary['duration_seconds']}s")
+    print(f"  ok: {sc.get('ok', 0)} | partial: {sc.get('partial', 0)} | skipped: {sc.get('skipped', 0)} | error: {sc.get('error', 0)}")
+
+
 if __name__ == "__main__":
-    ideas, skipped = load_content_ideas("Content ideas.xlsx")
-    print_summary(ideas, skipped)
-
-    # Demonstrate Phase 3 pipeline with synthetic data
-    print("\n" + "="*60)
-    print("PHASE 3 PIPELINE: Data Processing & Selection")
-    print("="*60 + "\n")
-
-    # Show queries for first idea
-    if ideas:
-        test_idea = ideas[0]
-        queries = generate_queries(test_idea)
-        print(f"Example: Row {test_idea.row_number} - {test_idea.content_type} | {test_idea.topic}")
-        print(f"Generated {len(queries)} queries: {', '.join(queries)}\n")
-
-    # Create synthetic TikTok results to demonstrate pipeline
-    print("Demonstrating with synthetic data:\n")
-
-    # Create 5 fake TikTok results with varied engagement and some shared audio
-    fake_results = [
-        {
-            "id": "7001",
-            "webVideoUrl": "https://tiktok.com/@user1/video/7001",
-            "text": "Founder story about building startup from scratch",
-            "authorMeta": {"name": "startup_founder"},
-            "createTimeISO": "2026-01-20T10:00:00Z",
-            "playCount": 150000,
-            "diggCount": 8000,
-            "commentCount": 350,
-            "shareCount": 120,
-            "musicMeta": {
-                "musicId": "audio123",
-                "musicName": "Inspirational Beat",
-                "musicAuthor": "AudioPro",
-                "playUrl": "https://tiktok.com/music/audio123"
-            }
-        },
-        {
-            "id": "7002",
-            "webVideoUrl": "https://tiktok.com/@user2/video/7002",
-            "text": "Day in the life entrepreneur routine",
-            "authorMeta": {"name": "daily_creator"},
-            "createTimeISO": "2026-01-25T14:30:00Z",
-            "playCount": 95000,
-            "diggCount": 5200,
-            "commentCount": 180,
-            "shareCount": 65,
-            "musicMeta": {
-                "musicId": "audio123",
-                "musicName": "Inspirational Beat",
-                "musicAuthor": "AudioPro",
-                "playUrl": "https://tiktok.com/music/audio123"
-            }
-        },
-        {
-            "id": "7003",
-            "webVideoUrl": "https://tiktok.com/@user3/video/7003",
-            "text": "Startup lesson learned the hard way",
-            "authorMeta": {"name": "wise_founder"},
-            "createTimeISO": "2026-02-01T09:15:00Z",
-            "playCount": 220000,
-            "diggCount": 12000,
-            "commentCount": 580,
-            "shareCount": 200,
-            "musicMeta": {
-                "musicId": "audio456",
-                "musicName": "Upbeat Vibe",
-                "musicAuthor": "MusicMaker",
-                "playUrl": "https://tiktok.com/music/audio456"
-            }
-        },
-        {
-            "id": "7004",
-            "webVideoUrl": "https://tiktok.com/@user4/video/7004",
-            "text": "Building in public founder journey",
-            "authorMeta": {"name": "transparent_ceo"},
-            "createTimeISO": "2026-01-18T16:45:00Z",
-            "playCount": 68000,
-            "diggCount": 3800,
-            "commentCount": 120,
-            "shareCount": 45,
-            "musicMeta": {
-                "musicId": "audio123",
-                "musicName": "Inspirational Beat",
-                "musicAuthor": "AudioPro",
-                "playUrl": "https://tiktok.com/music/audio123"
-            }
-        },
-        {
-            "id": "7005",
-            "webVideoUrl": "https://tiktok.com/@user5/video/7005",
-            "text": "Entrepreneur mindset shift that changed everything",
-            "authorMeta": {"name": "growth_minded"},
-            "createTimeISO": "2026-01-28T11:20:00Z",
-            "playCount": 42000,
-            "diggCount": 2100,
-            "commentCount": 85,
-            "shareCount": 28,
-            "musicMeta": {
-                "musicId": "audio789",
-                "musicName": "Chill Lofi",
-                "musicAuthor": "LofiBeats",
-                "playUrl": "https://tiktok.com/music/audio789"
-            }
-        }
-    ]
-
-    # Process through full pipeline
-    if ideas:
-        test_idea = ideas[0]
-        enriched = enrich_row(test_idea, fake_results)
-
-        print(f"Processed {enriched['total_results']} raw results")
-        print(f"After filtering/scoring: {enriched['scored_results']} results")
-        print(f"Enrich Status: {enriched['enrich_status']}")
-        if enriched.get('enrich_reason'):
-            print(f"Enrich Reason: {enriched['enrich_reason']}")
-        print()
-
-        # Show top 3 examples
-        print("Top 3 Examples:")
-        for i, ex in enumerate(enriched['examples'], 1):
-            print(f"  {i}. @{ex['author_username']}")
-            print(f"     Score: {ex['final_score']:.2f}")
-            print(f"     Views: {ex['views']:,} | Likes: {ex['likes']:,} | Comments: {ex['comments']:,}")
-            print(f"     Caption: {ex['caption'][:60]}...")
-            print(f"     Audio Title: {enriched.get(f'ex{i}_audio_title', 'N/A')}")
-            print(f"     URL: {ex['url']}")
-            print()
-
-        # Show selected audio
-        audio = enriched['audio']
-        print("Selected Audio:")
-        print(f"  Title: {audio['audio_title']}")
-        print(f"  Author: {audio['audio_author']}")
-        print(f"  Confidence: {audio['audio_confidence']} (appears in top results)")
-        print(f"  URL: {audio['audio_url']}")
-        print()
-
-        # Show LLM content (if available)
-        has_openai_key = os.environ.get("OPENAI_API_KEY") is not None
-
-        if not has_openai_key:
-            print("="*60)
-            print("Set OPENAI_API_KEY to enable LLM text generation")
-            print("="*60)
-        else:
-            print("LLM-Generated Content:")
-            print(f"  Audio Fit Reason: {enriched.get('audio_fit_reason', 'N/A')}")
-            print()
-            print("  Hook Summaries:")
-            for i in range(1, 4):
-                summary = enriched.get(f'ex{i}_hook_summary', '')
-                if summary:
-                    print(f"    Example {i}: {summary}")
-            print()
-            print("  Remix Ideas:")
-            remix_ideas = enriched.get('remix_ideas', '')
-            if remix_ideas:
-                print(f"    {remix_ideas}")
-            else:
-                print("    N/A")
-
-    print("\n" + "="*60)
-    print("Phase 4 pipeline ready. Set APIFY_TOKEN and OPENAI_API_KEY to run with full pipeline.")
-    print("="*60)
-
-    # TEMPORARY TEST CODE FOR PHASE 5 PLAN 01
-    print("\n" + "="*60)
-    print("Testing write_enriched_excel function")
-    print("="*60 + "\n")
-
-    # Test write_enriched_excel with first idea
-    if ideas and enriched:
-        test_enrichments = [enriched]
-        test_ideas = [ideas[0]]
-        write_enriched_excel(test_ideas, test_enrichments, "test_output.xlsx")
-        print("Created test_output.xlsx")
-
-        # Verify by reading it back
-        test_wb = load_workbook("test_output.xlsx")
-        test_ws = test_wb.active
-        headers_read = [cell.value for cell in test_ws[1]]
-        print(f"Headers count: {len(headers_read)}")
-        print(f"First 5 headers: {headers_read[:5]}")
-        print(f"Topic Keywords column exists: {'Topic Keywords' in headers_read}")
-        test_wb.close()
-        print("Verification passed!\n")
-
-        # Test build_run_log and save_run_log
-        print("="*60)
-        print("Testing build_run_log and save_run_log functions")
-        print("="*60 + "\n")
-
-        start_test = time.time()
-        time.sleep(0.1)  # Simulate some work
-        end_test = time.time()
-
-        run_log = build_run_log(
-            test_ideas,
-            test_enrichments,
-            "Content ideas.xlsx",
-            "test_output.xlsx",
-            start_test,
-            end_test
-        )
-
-        print(f"Run log structure created:")
-        print(f"  Timestamp: {run_log['run_summary']['timestamp']}")
-        print(f"  Total rows: {run_log['run_summary']['total_rows']}")
-        print(f"  Status counts: {run_log['run_summary']['status_counts']}")
-        print(f"  Duration: {run_log['run_summary']['duration_seconds']}s")
-        print(f"  Rows array length: {len(run_log['rows'])}")
-
-        # Verify status counts add up
-        counts = run_log['run_summary']['status_counts']
-        total = sum(counts.values())
-        print(f"  Status counts sum: {total} (should equal total_rows)")
-
-        # Save to JSON
-        save_run_log(run_log, "test_run_log.json")
-        print("\nCreated test_run_log.json")
-
-        # Verify JSON is valid
-        with open("test_run_log.json", 'r') as f:
-            loaded_log = json.load(f)
-        print(f"JSON validation: {'run_summary' in loaded_log and 'rows' in loaded_log}")
-        print("Verification passed!")
-    # END TEMPORARY TEST CODE
+    main()
