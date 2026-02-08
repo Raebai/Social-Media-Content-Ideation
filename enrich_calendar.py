@@ -12,7 +12,9 @@ import json
 from collections import Counter
 from dataclasses import dataclass
 from typing import Tuple, List, Dict, Any, Optional
-from openpyxl import load_workbook
+from openpyxl import load_workbook, Workbook
+from openpyxl.styles import Font, Alignment
+from openpyxl.utils import get_column_letter
 from dateutil.parser import parse as date_parse
 import requests
 import openai
@@ -1141,6 +1143,169 @@ def enrich_row(idea: ContentIdea, raw_results: List[Dict[str, Any]], openai_clie
     }
 
 
+def write_enriched_excel(ideas: List[ContentIdea], enrichments: List[Dict[str, Any]], output_path: str) -> None:
+    """
+    Write enriched content ideas to Excel with styled headers and grouped columns.
+
+    Args:
+        ideas: List of original ContentIdea objects
+        enrichments: List of enrichment dicts from enrich_row()
+        output_path: Path to write output Excel file
+
+    Column layout (grouped by concern):
+    1. INPUT: Day, Date, Type, Topic, Description
+    2. QUERY: Topic Keywords, Search Queries
+    3. EXAMPLE 1: Ex1 URL, Ex1 Views, Ex1 Likes, Ex1 Comments, Ex1 Shares, Ex1 Author, Ex1 Caption, Ex1 Audio, Ex1 Hook Summary
+    4. EXAMPLE 2: Ex2 URL, Ex2 Views, Ex2 Likes, Ex2 Comments, Ex2 Shares, Ex2 Author, Ex2 Caption, Ex2 Audio, Ex2 Hook Summary
+    5. EXAMPLE 3: Ex3 URL, Ex3 Views, Ex3 Likes, Ex3 Comments, Ex3 Shares, Ex3 Author, Ex3 Caption, Ex3 Audio, Ex3 Hook Summary
+    6. AUDIO: Audio Title, Audio Author, Audio Confidence, Audio URL, Audio Fit Reason
+    7. LLM: Remix Ideas
+    8. STATUS: Enrich Status, Enrich Reason
+    """
+    # Create workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Enriched Content"
+
+    # Define column headers in order
+    headers = [
+        # INPUT GROUP
+        "Day", "Date", "Type", "Topic", "Description",
+        # QUERY GROUP
+        "Topic Keywords", "Search Queries",
+        # EXAMPLE 1
+        "Ex1 URL", "Ex1 Views", "Ex1 Likes", "Ex1 Comments", "Ex1 Shares",
+        "Ex1 Author", "Ex1 Caption", "Ex1 Audio", "Ex1 Hook Summary",
+        # EXAMPLE 2
+        "Ex2 URL", "Ex2 Views", "Ex2 Likes", "Ex2 Comments", "Ex2 Shares",
+        "Ex2 Author", "Ex2 Caption", "Ex2 Audio", "Ex2 Hook Summary",
+        # EXAMPLE 3
+        "Ex3 URL", "Ex3 Views", "Ex3 Likes", "Ex3 Comments", "Ex3 Shares",
+        "Ex3 Author", "Ex3 Caption", "Ex3 Audio", "Ex3 Hook Summary",
+        # AUDIO GROUP
+        "Audio Title", "Audio Author", "Audio Confidence", "Audio URL", "Audio Fit Reason",
+        # LLM GROUP
+        "Remix Ideas",
+        # STATUS GROUP
+        "Enrich Status", "Enrich Reason"
+    ]
+
+    # Write header row
+    ws.append(headers)
+
+    # Create enrichment lookup by row_number
+    enrichment_map = {e["row_number"]: e for e in enrichments}
+
+    # Write data rows
+    for idea in ideas:
+        enrichment = enrichment_map.get(idea.row_number, {})
+
+        # Get examples
+        examples = enrichment.get("examples", [])
+        ex1 = examples[0] if len(examples) > 0 else {}
+        ex2 = examples[1] if len(examples) > 1 else {}
+        ex3 = examples[2] if len(examples) > 2 else {}
+
+        # Get audio
+        audio = enrichment.get("audio", {})
+
+        # Build row data
+        row_data = [
+            # INPUT GROUP
+            idea.date.strftime("%A"),  # Day
+            idea.date.strftime("%Y-%m-%d"),  # Date (normalized)
+            idea.content_type,  # Type
+            idea.topic,  # Topic
+            idea.description,  # Description
+
+            # QUERY GROUP
+            ", ".join(enrichment.get("topic_keywords", [])),  # Topic Keywords
+            " | ".join(enrichment.get("queries", [])),  # Search Queries
+
+            # EXAMPLE 1
+            ex1.get("url", ""),
+            ex1.get("views", ""),
+            ex1.get("likes", ""),
+            ex1.get("comments", ""),
+            ex1.get("shares", ""),
+            ex1.get("author_username", ""),
+            ex1.get("caption", ""),
+            ex1.get("audio_title", ""),
+            enrichment.get("ex1_hook_summary", ""),
+
+            # EXAMPLE 2
+            ex2.get("url", ""),
+            ex2.get("views", ""),
+            ex2.get("likes", ""),
+            ex2.get("comments", ""),
+            ex2.get("shares", ""),
+            ex2.get("author_username", ""),
+            ex2.get("caption", ""),
+            ex2.get("audio_title", ""),
+            enrichment.get("ex2_hook_summary", ""),
+
+            # EXAMPLE 3
+            ex3.get("url", ""),
+            ex3.get("views", ""),
+            ex3.get("likes", ""),
+            ex3.get("comments", ""),
+            ex3.get("shares", ""),
+            ex3.get("author_username", ""),
+            ex3.get("caption", ""),
+            ex3.get("audio_title", ""),
+            enrichment.get("ex3_hook_summary", ""),
+
+            # AUDIO GROUP
+            audio.get("audio_title", ""),
+            audio.get("audio_author", ""),
+            audio.get("audio_confidence", ""),
+            audio.get("audio_url", ""),
+            enrichment.get("audio_fit_reason", ""),
+
+            # LLM GROUP
+            enrichment.get("remix_ideas", ""),
+
+            # STATUS GROUP
+            enrichment.get("enrich_status", ""),
+            enrichment.get("enrich_reason", "")
+        ]
+
+        ws.append(row_data)
+
+    # Apply header styling
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+
+    # Freeze header row
+    ws.freeze_panes = "A2"
+
+    # Apply wrap_text to Remix Ideas column (column index based on headers)
+    remix_ideas_col_idx = headers.index("Remix Ideas") + 1
+    for row_idx in range(2, ws.max_row + 1):
+        cell = ws.cell(row=row_idx, column=remix_ideas_col_idx)
+        cell.alignment = Alignment(wrap_text=True)
+
+    # Auto-fit column widths
+    for col_idx, column_cells in enumerate(ws.columns, 1):
+        col_letter = get_column_letter(col_idx)
+
+        # Find max content length in column
+        max_length = 0
+        for cell in column_cells:
+            if cell.value:
+                cell_value_str = str(cell.value)
+                # Cap content length check at 50 chars
+                content_length = min(len(cell_value_str), 50)
+                max_length = max(max_length, content_length)
+
+        # Set column width (add padding)
+        adjusted_width = max_length + 2
+        ws.column_dimensions[col_letter].width = adjusted_width
+
+    # Save workbook
+    wb.save(output_path)
+
+
 if __name__ == "__main__":
     ideas, skipped = load_content_ideas("Content ideas.xlsx")
     print_summary(ideas, skipped)
@@ -1308,3 +1473,26 @@ if __name__ == "__main__":
     print("\n" + "="*60)
     print("Phase 4 pipeline ready. Set APIFY_TOKEN and OPENAI_API_KEY to run with full pipeline.")
     print("="*60)
+
+    # TEMPORARY TEST CODE FOR PHASE 5 PLAN 01
+    print("\n" + "="*60)
+    print("Testing write_enriched_excel function")
+    print("="*60 + "\n")
+
+    # Test write_enriched_excel with first idea
+    if ideas and enriched:
+        test_enrichments = [enriched]
+        test_ideas = [ideas[0]]
+        write_enriched_excel(test_ideas, test_enrichments, "test_output.xlsx")
+        print("Created test_output.xlsx")
+
+        # Verify by reading it back
+        test_wb = load_workbook("test_output.xlsx")
+        test_ws = test_wb.active
+        headers_read = [cell.value for cell in test_ws[1]]
+        print(f"Headers count: {len(headers_read)}")
+        print(f"First 5 headers: {headers_read[:5]}")
+        print(f"Topic Keywords column exists: {'Topic Keywords' in headers_read}")
+        test_wb.close()
+        print("Verification passed!")
+    # END TEMPORARY TEST CODE
