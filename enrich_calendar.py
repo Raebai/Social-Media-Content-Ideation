@@ -898,6 +898,16 @@ def generate_llm_content(idea: ContentIdea, examples: List[Dict[str, Any]], audi
     """
     # Step 1: Client setup
     if client is None:
+        # Check if OPENAI_API_KEY is set
+        if not os.environ.get("OPENAI_API_KEY"):
+            # No API key - return empty fields
+            return {
+                "audio_fit_reason": "",
+                "ex1_hook_summary": "",
+                "ex2_hook_summary": "",
+                "ex3_hook_summary": "",
+                "remix_ideas": ""
+            }
         client = openai.OpenAI()  # Reads OPENAI_API_KEY from env automatically
 
     # Step 2: Build prompt with brand context and type-specific direction
@@ -1065,13 +1075,53 @@ def enrich_row(idea: ContentIdea, raw_results: List[Dict[str, Any]], openai_clie
     # Step 4: Select audio
     audio = select_audio(scored, examples)
 
-    # Step 5: Build and return enrichment dict
+    # Step 5: Generate LLM content (if we have scored results)
+    enrich_status = "ok"
+    enrich_reason = ""
+
+    if len(scored) == 0:
+        # No results - skip LLM call
+        llm_content = {
+            "audio_fit_reason": "",
+            "ex1_hook_summary": "",
+            "ex2_hook_summary": "",
+            "ex3_hook_summary": "",
+            "remix_ideas": ""
+        }
+        enrich_status = "skip"
+        enrich_reason = "No scored results"
+    else:
+        # Generate LLM content
+        llm_content = generate_llm_content(idea, examples, audio, client=openai_client)
+
+        # Check if LLM generation failed (all fields empty)
+        all_empty = all(
+            llm_content.get(key, "") == ""
+            for key in ["audio_fit_reason", "ex1_hook_summary", "ex2_hook_summary",
+                       "ex3_hook_summary", "remix_ideas"]
+        )
+
+        if all_empty:
+            enrich_status = "partial"
+            enrich_reason = "LLM generation failed"
+
+    # Step 6: Build and return enrichment dict with LLM fields
     return {
         "row_number": idea.row_number,
         "content_type": idea.content_type,
         "topic": idea.topic,
         "examples": examples,
         "audio": audio,
+        "audio_fit_reason": llm_content.get("audio_fit_reason", ""),
+        "ex1_hook_summary": llm_content.get("ex1_hook_summary", ""),
+        "ex2_hook_summary": llm_content.get("ex2_hook_summary", ""),
+        "ex3_hook_summary": llm_content.get("ex3_hook_summary", ""),
+        "ex1_audio_title": examples[0]["audio_title"] if len(examples) > 0 else "",
+        "ex2_audio_title": examples[1]["audio_title"] if len(examples) > 1 else "",
+        "ex3_audio_title": examples[2]["audio_title"] if len(examples) > 2 else "",
+        "remix_ideas": llm_content.get("remix_ideas", ""),
+        "enrich_status": enrich_status,
+        "enrich_reason": enrich_reason,
         "total_results": len(raw_results),
         "scored_results": len(scored),
         "queries": generate_queries(idea)
@@ -1192,7 +1242,11 @@ if __name__ == "__main__":
         enriched = enrich_row(test_idea, fake_results)
 
         print(f"Processed {enriched['total_results']} raw results")
-        print(f"After filtering/scoring: {enriched['scored_results']} results\n")
+        print(f"After filtering/scoring: {enriched['scored_results']} results")
+        print(f"Enrich Status: {enriched['enrich_status']}")
+        if enriched.get('enrich_reason'):
+            print(f"Enrich Reason: {enriched['enrich_reason']}")
+        print()
 
         # Show top 3 examples
         print("Top 3 Examples:")
@@ -1201,6 +1255,7 @@ if __name__ == "__main__":
             print(f"     Score: {ex['final_score']:.2f}")
             print(f"     Views: {ex['views']:,} | Likes: {ex['likes']:,} | Comments: {ex['comments']:,}")
             print(f"     Caption: {ex['caption'][:60]}...")
+            print(f"     Audio Title: {enriched.get(f'ex{i}_audio_title', 'N/A')}")
             print(f"     URL: {ex['url']}")
             print()
 
@@ -1211,7 +1266,32 @@ if __name__ == "__main__":
         print(f"  Author: {audio['audio_author']}")
         print(f"  Confidence: {audio['audio_confidence']} (appears in top results)")
         print(f"  URL: {audio['audio_url']}")
+        print()
+
+        # Show LLM content (if available)
+        has_openai_key = os.environ.get("OPENAI_API_KEY") is not None
+
+        if not has_openai_key:
+            print("="*60)
+            print("Set OPENAI_API_KEY to enable LLM text generation")
+            print("="*60)
+        else:
+            print("LLM-Generated Content:")
+            print(f"  Audio Fit Reason: {enriched.get('audio_fit_reason', 'N/A')}")
+            print()
+            print("  Hook Summaries:")
+            for i in range(1, 4):
+                summary = enriched.get(f'ex{i}_hook_summary', '')
+                if summary:
+                    print(f"    Example {i}: {summary}")
+            print()
+            print("  Remix Ideas:")
+            remix_ideas = enriched.get('remix_ideas', '')
+            if remix_ideas:
+                print(f"    {remix_ideas}")
+            else:
+                print("    N/A")
 
     print("\n" + "="*60)
-    print("Phase 3 pipeline ready. Set APIFY_TOKEN to run with real data.")
+    print("Phase 4 pipeline ready. Set APIFY_TOKEN and OPENAI_API_KEY to run with full pipeline.")
     print("="*60)
