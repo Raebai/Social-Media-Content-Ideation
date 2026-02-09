@@ -1,9 +1,12 @@
 """
 Content calendar enrichment tool.
 
-Reads a content calendar Excel file, enriches each row with TikTok trends,
-audio recommendations, and AI-generated creative text. Outputs enriched Excel
-and diagnostic run log.
+Reads a content calendar Excel file, enriches each row across three platforms:
+- TikTok: trends, audio picks, and remix ideas
+- Twitter: draft tweets, thread structures, and references
+- LinkedIn: draft posts and references
+
+Outputs enriched Excel (3 sheets) and diagnostic run log.
 
 Usage: python enrich_calendar.py --input "Content ideas.xlsx"
 """
@@ -23,19 +26,44 @@ from openpyxl.utils import get_column_letter
 from dateutil.parser import parse as date_parse
 import requests
 import openai
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 VALID_TYPES = {"Story", "BTS", "Teach", "Trend", "Breakdown", "Reflection", "Depth"}
 
-# Apify API Configuration
-APIFY_BASE_URL = "https://api.apify.com/v2"
-APIFY_ACTOR_ID = "clockworks~tiktok-scraper"
-MAX_RESULTS_PER_ROW = 150
-RESULTS_PER_QUERY = 25
+# RapidAPI Configuration
+RAPIDAPI_TIKTOK_HOST = "tiktok-api23.p.rapidapi.com"
+RAPIDAPI_TWITTER_HOST = "twitter-api45.p.rapidapi.com"
+MAX_RESULTS_PER_ROW = 21
+RESULTS_PER_QUERY = 10
+MIN_LIKES = 1_000
 MAX_RETRIES = 3
 
-# Query cache to avoid duplicate API calls
+# Twitter Configuration
+TWITTER_RESULTS_PER_QUERY = 10
+TWITTER_MAX_RESULTS_PER_ROW = 20
+
+# Query caches to avoid duplicate API calls
 _query_cache: Dict[str, List[Dict]] = {}
+_twitter_query_cache: Dict[str, List[Dict]] = {}
+
+
+def extract_keywords(text: str) -> List[str]:
+    """Extract meaningful keywords (>3 chars, no stop words) from text."""
+    import re
+    # Strip punctuation from each word before filtering
+    words = [re.sub(r'[^\w]', '', w) for w in text.lower().split()]
+    stop_words = {'the', 'and', 'for', 'with', 'from', 'this', 'that', 'what',
+                  'when', 'where', 'who', 'how', 'why'}
+    return [w for w in words if len(w) > 3 and w not in stop_words]
+
+
+def has_enough_context(idea) -> bool:
+    """Check if a row has enough context to justify an API call (>= 3 keywords)."""
+    all_kw = extract_keywords(idea.topic) + extract_keywords(idea.description)
+    return len(all_kw) >= 3
 
 
 @dataclass
@@ -270,106 +298,55 @@ def print_summary(ideas: List[ContentIdea], skipped: List[Dict[str, Any]]) -> No
 
 # Query generation for TikTok search
 TYPE_QUERY_MAP = {
-    "Story": "founder story",
-    "BTS": "day in the life",
-    "Teach": "startup lesson",
-    "Trend": "new chapter",
-    "Breakdown": "mindset shift",
-    "Reflection": "founder reflection",
-    "Depth": "longform reflection"
+    "Story": "entrepreneur story time",
+    "BTS": "day in the life CEO",
+    "Teach": "business lessons learned",
+    "Trend": "entrepreneur new chapter",
+    "Breakdown": "business mindset shift",
+    "Reflection": "entrepreneur honest reflection",
+    "Depth": "founder weekly vlog"
 }
 
 
 def generate_queries(idea: ContentIdea) -> List[str]:
     """
-    Generate 3-6 TikTok search queries from a content idea.
+    Generate up to 3 targeted TikTok search queries from a content idea.
 
-    At least one query is a format-specific query from TYPE_QUERY_MAP.
+    Priority: format-specific > topic > keyword combo.
     All queries are <=5 words.
-
-    Args:
-        idea: ContentIdea to generate queries from
-
-    Returns:
-        List of 3-6 query strings, each <=5 words
     """
     queries = []
 
-    # Helper to truncate queries to 5 words
     def truncate_to_5_words(text: str) -> str:
         words = text.split()
         return ' '.join(words[:5]) if len(words) > 5 else text
 
-    # Helper to extract keywords (meaningful words >3 chars)
-    def extract_keywords(text: str) -> List[str]:
-        words = text.lower().split()
-        # Filter out common stop words and short words
-        stop_words = {'the', 'and', 'for', 'with', 'from', 'this', 'that', 'what', 'when', 'where', 'who', 'how', 'why'}
-        keywords = [w for w in words if len(w) > 3 and w not in stop_words]
-        return keywords
+    # 1. Format-specific query (highest value)
+    queries.append(TYPE_QUERY_MAP.get(idea.content_type, "founder content"))
 
-    # 1. Format-specific query from TYPE_QUERY_MAP (satisfies QRY-02)
-    format_query = TYPE_QUERY_MAP.get(idea.content_type, "founder content")
-    queries.append(format_query)
-
-    # 2. Extract keywords from topic and description
-    topic_keywords = extract_keywords(idea.topic)
-    desc_keywords = extract_keywords(idea.description)
-
-    # 3. Add topic as query if it's <=5 words
+    # 2. Topic as query
     if len(idea.topic.split()) <= 5:
         queries.append(idea.topic.lower())
 
-    # 4. Build keyword combination queries (2-3 keywords)
-    # Try topic keywords first
-    if len(topic_keywords) >= 2:
-        combo = ' '.join(topic_keywords[:3])
-        combo = truncate_to_5_words(combo)
-        queries.append(combo)
+    # 3. Best keyword combo from topic + description
+    all_kw = extract_keywords(idea.topic) + extract_keywords(idea.description)
+    if len(all_kw) >= 2:
+        queries.append(truncate_to_5_words(' '.join(all_kw[:3])))
 
-    # Try description keywords
-    if len(desc_keywords) >= 2:
-        combo = ' '.join(desc_keywords[:3])
-        combo = truncate_to_5_words(combo)
-        queries.append(combo)
-
-    # 5. Niche query combining content type keyword + top topic keyword
-    type_keyword = idea.content_type.lower()
-    if topic_keywords:
-        niche_query = f"{type_keyword} {topic_keywords[0]}"
-        niche_query = truncate_to_5_words(niche_query)
-        queries.append(niche_query)
-    else:
-        # Fallback: use content type + "startup"
-        queries.append(f"startup {type_keyword}")
-
-    # 6. Cross-pollinate: description keyword + format
-    if desc_keywords:
-        cross_query = f"{desc_keywords[0]} {format_query.split()[0]}"
-        cross_query = truncate_to_5_words(cross_query)
-        queries.append(cross_query)
-
-    # Remove duplicates while preserving order
+    # Deduplicate
     seen = set()
-    unique_queries = []
+    unique = []
     for q in queries:
-        q_normalized = q.lower().strip()
-        if q_normalized not in seen:
-            seen.add(q_normalized)
-            unique_queries.append(q_normalized)
+        q_norm = q.lower().strip()
+        if q_norm not in seen:
+            seen.add(q_norm)
+            unique.append(q_norm)
 
-    # Ensure minimum 3 queries with fallbacks
-    fallbacks = ["startup founder content", "entrepreneur tiktok", "business growth tips"]
-    fallback_idx = 0
-    while len(unique_queries) < 3 and fallback_idx < len(fallbacks):
-        fallback = fallbacks[fallback_idx]
-        if fallback not in seen:
-            unique_queries.append(fallback)
-            seen.add(fallback)
-        fallback_idx += 1
+    # Ensure minimum 2 with fallback
+    if len(unique) < 2:
+        unique.append("startup founder content")
 
-    # Return 3-6 queries (trim if we have too many)
-    return unique_queries[:6]
+    return unique[:3]
 
 
 def _call_with_retry(fn, *args, max_retries=MAX_RETRIES, **kwargs) -> Any:
@@ -389,6 +366,11 @@ def _call_with_retry(fn, *args, max_retries=MAX_RETRIES, **kwargs) -> Any:
         try:
             return fn(*args, **kwargs)
         except (requests.RequestException, ValueError, openai.APIError) as e:
+            # Don't retry billing/auth errors — they'll never succeed
+            err_str = str(e)
+            if any(code in err_str for code in ("401", "402", "403", "insufficient_quota", "hard limit")):
+                print(f"Non-retryable error: {e}", file=sys.stderr)
+                return []
             if attempt < max_retries - 1:
                 wait_time = 2 ** attempt
                 print(f"Retry {attempt + 1}/{max_retries} after error: {e}", file=sys.stderr)
@@ -399,110 +381,51 @@ def _call_with_retry(fn, *args, max_retries=MAX_RETRIES, **kwargs) -> Any:
                 return []
 
 
-def _run_apify_actor(query: str, token: str, max_items: int = RESULTS_PER_QUERY) -> List[Dict[str, Any]]:
-    """
-    Run Apify TikTok scraper actor for a single query.
-
-    Args:
-        query: Search query string
-        token: Apify API token
-        max_items: Maximum results to fetch per query
-
-    Returns:
-        List of TikTok video result dictionaries
-
-    Raises:
-        requests.RequestException: On API call failures
-        ValueError: On invalid response format
-    """
-    # Build input payload based on discovered schema
-    input_payload = {
-        "searchQueries": [query],
-        "resultsPerPage": max_items,
-        "searchSection": "/video",  # Videos only
-        "searchSorting": "0",  # Most relevant
-        "searchDatePosted": "0"  # All time
-    }
-
-    # Use synchronous endpoint for simplicity
-    url = f"{APIFY_BASE_URL}/acts/{APIFY_ACTOR_ID}/run-sync-get-dataset-items"
-
+def _run_tiktok_rapidapi(query: str, api_key: str, max_items: int = RESULTS_PER_QUERY) -> List[Dict[str, Any]]:
+    """Fetch TikTok search results via RapidAPI tiktok-api23."""
+    url = f"https://{RAPIDAPI_TIKTOK_HOST}/api/search/general"
     headers = {
-        "Content-Type": "application/json"
+        "x-rapidapi-host": RAPIDAPI_TIKTOK_HOST,
+        "x-rapidapi-key": api_key,
     }
+    params = {"keyword": query, "count": max_items}
 
-    params = {
-        "token": token
-    }
+    response = requests.get(url, headers=headers, params=params, timeout=60)
 
-    response = requests.post(url, json=input_payload, headers=headers, params=params, timeout=300)
-
-    if response.status_code != 200 and response.status_code != 201:
+    if response.status_code != 200:
         raise requests.RequestException(
-            f"Apify API returned status {response.status_code}: {response.text}"
+            f"TikTok API returned status {response.status_code}: {response.text}"
         )
 
-    try:
-        results = response.json()
-        # Synchronous endpoint returns array directly
-        if isinstance(results, list):
-            return results
-        # Or might be wrapped in a data field
-        elif isinstance(results, dict) and "data" in results:
-            return results["data"]
-        else:
-            return []
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Invalid JSON response from Apify: {e}")
+    data = response.json()
+    # Extract item dicts from data array
+    results = []
+    for entry in data.get("data", []):
+        item = entry.get("item")
+        if item:
+            results.append(item)
+    return results[:max_items]
 
 
 def fetch_tiktok_results(queries: List[str], token: Optional[str] = None) -> List[Dict[str, Any]]:
-    """
-    Fetch TikTok results for multiple queries with caching and result cap.
-
-    Features:
-    - Retry logic: Up to 3 attempts with exponential backoff
-    - Caching: Identical queries within a run return cached results
-    - Result cap: Maximum 150 results per row regardless of query count
-
-    Args:
-        queries: List of search query strings
-        token: Apify API token (defaults to APIFY_TOKEN env var)
-
-    Returns:
-        List of TikTok video result dictionaries, capped at MAX_RESULTS_PER_ROW
-
-    Raises:
-        ValueError: If APIFY_TOKEN not found in environment
-    """
-    # Get token from environment if not provided
+    """Fetch TikTok results for multiple queries with caching and result cap."""
     if token is None:
-        token = os.environ.get("APIFY_TOKEN")
-
+        token = os.environ.get("RAPIDAPI_KEY")
     if not token:
-        raise ValueError("APIFY_TOKEN not found in environment")
+        raise ValueError("RAPIDAPI_KEY not found in environment")
 
     results = []
-
     for query in queries:
-        # Normalize query for cache key
         query_normalized = query.lower().strip()
 
-        # Check cache first (API-06)
         if query_normalized in _query_cache:
-            print(f"Cache hit for query: {query}", file=sys.stderr)
+            print(f"TikTok cache hit: {query}", file=sys.stderr)
             results.extend(_query_cache[query_normalized])
         else:
-            # Call API with retry logic
-            query_results = _call_with_retry(_run_apify_actor, query, token)
-
-            # Store in cache
+            query_results = _call_with_retry(_run_tiktok_rapidapi, query, token)
             _query_cache[query_normalized] = query_results
-
-            # Add to results
             results.extend(query_results)
 
-        # Check result cap (API-03)
         if len(results) >= MAX_RESULTS_PER_ROW:
             results = results[:MAX_RESULTS_PER_ROW]
             break
@@ -534,41 +457,47 @@ def enrich_row_queries(idea: ContentIdea) -> Dict[str, Any]:
 
 def normalize_result(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
-    Normalize Apify TikTok result to standard schema.
+    Normalize RapidAPI TikTok result to standard schema.
 
-    Maps Apify output schema to our standard video metadata structure.
+    Maps tiktok-api23 item schema to our standard video metadata structure.
     Returns None for malformed results (missing required fields).
-
-    Args:
-        raw: Raw Apify result dictionary
-
-    Returns:
-        Normalized video dict with standard schema, or None if malformed
     """
-    # Check required fields
-    if not raw.get("id"):
+    video_id = raw.get("id")
+    if not video_id:
         return None
 
-    # Build normalized result
-    normalized = {
-        "video_id": raw["id"],
-        "url": raw.get("webVideoUrl", ""),
-        "caption": raw.get("text", ""),
-        "author_username": raw.get("authorMeta", {}).get("name", ""),
-        "create_time": raw.get("createTimeISO", None),
-        "views": raw.get("playCount", 0),
-        "likes": raw.get("diggCount", 0),
-        "comments": raw.get("commentCount", 0),
-        "shares": raw.get("shareCount", 0),
+    stats = raw.get("stats", {})
+    author = raw.get("author", {})
+    music = raw.get("music", {})
+
+    # Convert unix timestamp to ISO string
+    create_time = raw.get("createTime")
+    create_time_iso = None
+    if create_time:
+        try:
+            create_time_iso = datetime.datetime.fromtimestamp(
+                int(create_time), tz=datetime.timezone.utc
+            ).isoformat()
+        except (ValueError, OSError):
+            pass
+
+    return {
+        "video_id": str(video_id),
+        "url": f"https://www.tiktok.com/@{author.get('uniqueId', '')}/video/{video_id}",
+        "caption": raw.get("desc", ""),
+        "author_username": author.get("uniqueId", ""),
+        "create_time": create_time_iso,
+        "views": stats.get("playCount", 0),
+        "likes": stats.get("diggCount", 0),
+        "comments": stats.get("commentCount", 0),
+        "shares": stats.get("shareCount", 0),
         "audio": {
-            "audio_id": raw.get("musicMeta", {}).get("musicId", ""),
-            "title": raw.get("musicMeta", {}).get("musicName", ""),
-            "author": raw.get("musicMeta", {}).get("musicAuthor", ""),
-            "url": raw.get("musicMeta", {}).get("playUrl", "")
+            "audio_id": str(music.get("id", "")),
+            "title": music.get("title", ""),
+            "author": music.get("authorName", ""),
+            "url": music.get("playUrl", "")
         }
     }
-
-    return normalized
 
 
 def deduplicate_results(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -653,13 +582,19 @@ def score_video(video: Dict[str, Any], keywords: List[str] = None) -> Dict[str, 
         Video dict with added score fields (base_score, recency_boost, relevance_boost, final_score)
     """
     # Step 1: Base score (DAT-04)
-    views = video.get("views", 0)
-    likes = video.get("likes", 0)
-    comments = video.get("comments", 0)
+    views = video.get("views", 0) or 0
+    likes = video.get("likes", 0) or 0
+    comments = video.get("comments", 0) or 0
 
-    base = (math.log10(views + 1) * 0.65 +
-            math.log10(likes + 1) * 0.25 +
-            math.log10(comments + 1) * 0.10)
+    # Like-to-view ratio bonus (rewards genuine engagement, penalizes AI slop)
+    like_ratio = likes / views if views > 0 else 0
+    # Normalize: 3%+ ratio = full bonus (1.0), scale linearly below that
+    ratio_score = min(like_ratio / 0.03, 1.0)
+
+    base = (math.log10(likes + 1) * 0.45 +
+            math.log10(comments + 1) * 0.25 +
+            math.log10(views + 1) * 0.15 +
+            ratio_score * 0.15)
 
     # Step 2: Recency boost (DAT-05)
     recency_boost = 0.0
@@ -884,6 +819,623 @@ def select_audio(scored_results: List[Dict[str, Any]], examples: List[Dict[str, 
     }
 
 
+# ---------------------------------------------------------------------------
+# Twitter integration
+# ---------------------------------------------------------------------------
+
+TWITTER_TYPE_QUERY_MAP = {
+    "Story": "my story entrepreneurship",
+    "BTS": "building in public",
+    "Teach": "business advice",
+    "Trend": "entrepreneur hot take",
+    "Breakdown": "business breakdown",
+    "Reflection": "founder lessons",
+    "Depth": "entrepreneurship thread"
+}
+
+
+def generate_twitter_queries(idea: ContentIdea) -> List[str]:
+    """Generate up to 3 Twitter search queries (hashtag + topic style)."""
+    queries = []
+
+    def truncate_to_5_words(text: str) -> str:
+        words = text.split()
+        return ' '.join(words[:5]) if len(words) > 5 else text
+
+    # 1. Format-specific hashtag query (highest value)
+    queries.append(TWITTER_TYPE_QUERY_MAP.get(idea.content_type, "#startup founder"))
+
+    # 2. Topic as query
+    if len(idea.topic.split()) <= 5:
+        queries.append(idea.topic.lower())
+
+    # 3. Best keyword combo
+    all_kw = extract_keywords(idea.topic) + extract_keywords(idea.description)
+    if len(all_kw) >= 2:
+        queries.append(truncate_to_5_words(' '.join(all_kw[:3])))
+
+    # Deduplicate
+    seen = set()
+    unique = []
+    for q in queries:
+        q_norm = q.lower().strip()
+        if q_norm not in seen:
+            seen.add(q_norm)
+            unique.append(q_norm)
+
+    if len(unique) < 2:
+        unique.append("startup founder advice")
+
+    return unique[:3]
+
+
+def _run_twitter_rapidapi(query: str, api_key: str, max_items: int = TWITTER_RESULTS_PER_QUERY) -> List[Dict[str, Any]]:
+    """Fetch Twitter search results via RapidAPI twitter-api45."""
+    url = f"https://{RAPIDAPI_TWITTER_HOST}/search.php"
+    headers = {
+        "x-rapidapi-host": RAPIDAPI_TWITTER_HOST,
+        "x-rapidapi-key": api_key,
+    }
+    params = {"query": query, "search_type": "Top"}
+    response = requests.get(url, headers=headers, params=params, timeout=60)
+
+    if response.status_code != 200:
+        raise requests.RequestException(
+            f"Twitter API returned status {response.status_code}: {response.text}"
+        )
+
+    data = response.json()
+    results = data.get("timeline", [])
+    return results[:max_items]
+
+
+def fetch_twitter_results(queries: List[str], token: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Fetch Twitter results for multiple queries with caching and result cap."""
+    if token is None:
+        token = os.environ.get("RAPIDAPI_KEY")
+    if not token:
+        raise ValueError("RAPIDAPI_KEY not found in environment")
+
+    results = []
+    for query in queries:
+        query_normalized = query.lower().strip()
+        if query_normalized in _twitter_query_cache:
+            print(f"Twitter cache hit: {query}", file=sys.stderr)
+            results.extend(_twitter_query_cache[query_normalized])
+        else:
+            query_results = _call_with_retry(_run_twitter_rapidapi, query, token)
+            _twitter_query_cache[query_normalized] = query_results
+            results.extend(query_results)
+
+        if len(results) >= TWITTER_MAX_RESULTS_PER_ROW:
+            results = results[:TWITTER_MAX_RESULTS_PER_ROW]
+            break
+
+    return results
+
+
+def normalize_twitter_result(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Normalize RapidAPI twitter-api45 tweet result to standard schema."""
+    tweet_id = raw.get("tweet_id") or raw.get("id")
+    if not tweet_id:
+        return None
+
+    screen_name = raw.get("screen_name", "")
+
+    # views comes as string from this API
+    views_raw = raw.get("views", 0)
+    try:
+        views = int(views_raw) if views_raw else 0
+    except (ValueError, TypeError):
+        views = 0
+
+    return {
+        "tweet_id": str(tweet_id),
+        "url": f"https://twitter.com/{screen_name}/status/{tweet_id}" if screen_name else f"https://twitter.com/i/status/{tweet_id}",
+        "text": raw.get("text", ""),
+        "author": screen_name,
+        "likes": raw.get("favorites", 0) or 0,
+        "retweets": raw.get("retweets", 0) or 0,
+        "replies": raw.get("replies", 0) or 0,
+        "views": views,
+        "created_at": raw.get("created_at", None),
+    }
+
+
+def score_tweet(tweet: Dict[str, Any], keywords: List[str] = None) -> Dict[str, Any]:
+    """Score a tweet: log10(likes+1)*0.45 + log10(retweets+1)*0.30 + log10(replies+1)*0.25 + boosts."""
+    likes = tweet.get("likes", 0) or 0
+    retweets = tweet.get("retweets", 0) or 0
+    replies = tweet.get("replies", 0) or 0
+
+    base = (math.log10(likes + 1) * 0.45 +
+            math.log10(retweets + 1) * 0.30 +
+            math.log10(replies + 1) * 0.25)
+
+    # Recency boost
+    recency_boost = 0.0
+    created_at = tweet.get("created_at")
+    if created_at:
+        try:
+            created_dt = date_parse(created_at)
+            if created_dt.tzinfo is None:
+                created_dt = created_dt.replace(tzinfo=datetime.timezone.utc)
+            days_old = (datetime.datetime.now(datetime.timezone.utc) - created_dt).days
+            if days_old <= 14:
+                recency_boost = 0.2
+            elif days_old <= 30:
+                recency_boost = 0.1
+        except Exception:
+            pass
+
+    # Relevance boost
+    relevance_boost = 0.0
+    if keywords:
+        text = tweet.get("text", "")
+        if text:
+            text_lower = text.lower()
+            overlap = sum(1 for kw in keywords if kw.lower() in text_lower)
+            relevance_boost = min(overlap * 0.05, 0.2)
+
+    tweet["base_score"] = base
+    tweet["recency_boost"] = recency_boost
+    tweet["relevance_boost"] = relevance_boost
+    tweet["final_score"] = base + recency_boost + relevance_boost
+    return tweet
+
+
+def process_twitter_results(raw_results: List[Dict[str, Any]], keywords: List[str] = None) -> List[Dict[str, Any]]:
+    """Normalize → dedup → filter old → score → sort tweets."""
+    normalized = [normalize_twitter_result(r) for r in raw_results]
+    normalized = [n for n in normalized if n is not None]
+
+    # Dedup by tweet_id
+    seen = set()
+    deduped = []
+    for t in normalized:
+        tid = t.get("tweet_id")
+        if tid and tid not in seen:
+            seen.add(tid)
+            deduped.append(t)
+
+    # Filter old (120 days)
+    filtered = filter_old_results(deduped, max_age_days=120)
+
+    scored = [score_tweet(t, keywords) for t in filtered]
+    return sorted(scored, key=lambda x: x.get("final_score", 0), reverse=True)
+
+
+def select_top_tweets(scored: List[Dict[str, Any]], count: int = 3) -> List[Dict[str, Any]]:
+    """Select top N tweets as examples."""
+    if not scored:
+        return []
+    examples = []
+    for tweet in scored[:count]:
+        examples.append({
+            "url": tweet["url"],
+            "text": tweet["text"],
+            "author": tweet["author"],
+            "likes": tweet["likes"],
+            "retweets": tweet["retweets"],
+            "replies": tweet["replies"],
+            "views": tweet["views"],
+            "created_at": tweet["created_at"],
+            "final_score": tweet["final_score"],
+        })
+    return examples
+
+
+def generate_twitter_content(idea: ContentIdea, examples: List[Dict[str, Any]], client=None) -> Dict[str, Any]:
+    """Generate Twitter content via LLM: draft_tweet, thread_structure, reference_notes, remix_ideas."""
+    empty = {"draft_tweet": "", "thread_structure": "", "reference_notes": "", "remix_ideas": ""}
+
+    if client is None:
+        if not os.environ.get("OPENAI_API_KEY"):
+            return empty
+        client = openai.OpenAI()
+
+    system_message = (
+        "You are a Twitter content strategist for Logara, a startup documenting its founder journey. "
+        "You craft viral tweets and threads. Respond in valid JSON only."
+    )
+
+    examples_text = ""
+    for i, ex in enumerate(examples, 1):
+        examples_text += f"\nExample {i}:\n"
+        examples_text += f"  - Text: {ex.get('text', 'N/A')[:280]}\n"
+        examples_text += f"  - Likes: {ex.get('likes', 0):,} | Retweets: {ex.get('retweets', 0):,}\n"
+        examples_text += f"  - Author: @{ex.get('author', 'unknown')}\n"
+
+    user_message = f"""Content Idea:
+- Type: {idea.content_type}
+- Topic: {idea.topic}
+- Description: {idea.description}
+
+Top Example Tweets:{examples_text}
+
+Brand Context:
+- Logara is a startup documenting its founder journey
+- Tone: Authentic, sharp, conversational
+
+Instructions:
+1. draft_tweet: A single tweet (max 280 chars) with a compelling hook for this topic
+2. thread_structure: A 3-5 tweet thread outline (numbered, each tweet summarized in one line)
+3. reference_notes: For each example, one sentence on why it works and what to learn
+4. remix_ideas: 2-3 tweet angle ideas as one-liner bullets
+
+Return JSON:
+{{
+  "draft_tweet": "the tweet text (max 280 chars)",
+  "thread_structure": "1. First tweet...\\n2. Second tweet...\\n3. ...",
+  "reference_notes": ["note for ex1", "note for ex2", "note for ex3"],
+  "remix_ideas": ["angle 1", "angle 2", "angle 3"]
+}}"""
+
+    def make_api_call():
+        return client.chat.completions.create(
+            model="gpt-4o-mini",
+            response_format={"type": "json_object"},
+            temperature=0.8,
+            max_tokens=600,
+            messages=[
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": user_message}
+            ]
+        )
+
+    try:
+        response = _call_with_retry(make_api_call)
+        if not response or response == []:
+            return empty
+
+        parsed = json.loads(response.choices[0].message.content)
+        ref_notes = parsed.get("reference_notes", [])
+        remix_list = parsed.get("remix_ideas", [])
+
+        return {
+            "draft_tweet": parsed.get("draft_tweet", ""),
+            "thread_structure": parsed.get("thread_structure", ""),
+            "reference_notes": "\n".join(f"- {n}" for n in ref_notes) if ref_notes else "",
+            "remix_ideas": "\n".join(f"- {r}" for r in remix_list) if remix_list else "",
+        }
+    except (json.JSONDecodeError, KeyError, IndexError, AttributeError) as e:
+        print(f"Error parsing Twitter LLM response: {e}", file=sys.stderr)
+        return empty
+
+
+def enrich_row_twitter(idea: ContentIdea, raw_results: List[Dict[str, Any]], openai_client=None) -> Dict[str, Any]:
+    """Orchestrate full Twitter enrichment pipeline for a single row."""
+    keywords = extract_keywords(idea.topic) + extract_keywords(idea.description)
+    scored = process_twitter_results(raw_results, keywords=keywords)
+    examples = select_top_tweets(scored)
+
+    enrich_status = "ok"
+    enrich_reason = ""
+
+    if len(scored) == 0:
+        # No API results — generate content from idea alone (LLM-only fallback)
+        llm = generate_twitter_content(idea, [], client=openai_client)
+        llm_has_content = any(llm.get(k, "") for k in ["draft_tweet", "thread_structure", "remix_ideas"])
+        if llm_has_content:
+            enrich_status = "partial"
+            enrich_reason = "LLM-only (no API results)"
+        else:
+            enrich_status = "skipped"
+            enrich_reason = "No API results and LLM generation failed"
+    else:
+        llm = generate_twitter_content(idea, examples, client=openai_client)
+        llm_failed = all(llm.get(k, "") == "" for k in ["draft_tweet", "thread_structure", "reference_notes", "remix_ideas"])
+        reasons = []
+        if llm_failed:
+            reasons.append("LLM generation failed")
+        if len(examples) < 2:
+            reasons.append(f"Only {len(examples)} example(s), need >=2")
+        if reasons:
+            enrich_status = "partial"
+            enrich_reason = "; ".join(reasons)
+
+    return {
+        "row_number": idea.row_number,
+        "content_type": idea.content_type,
+        "topic": idea.topic,
+        "examples": examples,
+        "draft_tweet": llm.get("draft_tweet", ""),
+        "thread_structure": llm.get("thread_structure", ""),
+        "reference_notes": llm.get("reference_notes", ""),
+        "remix_ideas": llm.get("remix_ideas", ""),
+        "enrich_status": enrich_status,
+        "enrich_reason": enrich_reason,
+        "total_results": len(raw_results),
+        "scored_results": len(scored),
+        "queries": generate_twitter_queries(idea),
+    }
+
+
+# ---------------------------------------------------------------------------
+# LinkedIn integration
+# ---------------------------------------------------------------------------
+
+LINKEDIN_TYPE_QUERY_MAP = {
+    "Story": "entrepreneur story lessons learned",
+    "BTS": "building a company behind the scenes",
+    "Teach": "business leadership lessons",
+    "Trend": "unpopular opinion entrepreneur",
+    "Breakdown": "business strategy breakdown",
+    "Reflection": "founder honest reflection journey",
+    "Depth": "entrepreneur deep dive lessons"
+}
+
+
+def generate_linkedin_queries(idea: ContentIdea) -> List[str]:
+    """Generate up to 3 LinkedIn search queries (professional phrases)."""
+    queries = []
+
+    def truncate_to_6_words(text: str) -> str:
+        words = text.split()
+        return ' '.join(words[:6]) if len(words) > 6 else text
+
+    # 1. Format-specific professional phrase (highest value)
+    queries.append(LINKEDIN_TYPE_QUERY_MAP.get(idea.content_type, "startup founder insights"))
+
+    # 2. Topic as query
+    if len(idea.topic.split()) <= 6:
+        queries.append(idea.topic.lower())
+
+    # 3. Best keyword combo
+    all_kw = extract_keywords(idea.topic) + extract_keywords(idea.description)
+    if len(all_kw) >= 2:
+        queries.append(truncate_to_6_words(' '.join(all_kw[:4])))
+
+    # Deduplicate
+    seen = set()
+    unique = []
+    for q in queries:
+        q_norm = q.lower().strip()
+        if q_norm not in seen:
+            seen.add(q_norm)
+            unique.append(q_norm)
+
+    if len(unique) < 2:
+        unique.append("startup founder lessons")
+
+    return unique[:3]
+
+
+def fetch_linkedin_results(queries: List[str], token: Optional[str] = None) -> List[Dict[str, Any]]:
+    """LinkedIn is LLM-only — no API calls. Always returns empty results."""
+    return []
+
+
+def normalize_linkedin_result(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Normalize Apify LinkedIn post result to standard schema."""
+    post_id = raw.get("postId") or raw.get("id") or raw.get("urn")
+    if not post_id:
+        return None
+
+    return {
+        "post_id": str(post_id),
+        "url": raw.get("postUrl", "") or raw.get("url", ""),
+        "text": raw.get("text", "") or raw.get("commentary", ""),
+        "author": raw.get("authorName", "") or raw.get("author", {}).get("name", "") if isinstance(raw.get("author"), dict) else raw.get("author", ""),
+        "reactions": raw.get("totalReactionCount", 0) or raw.get("numLikes", 0),
+        "comments": raw.get("commentsCount", 0) or raw.get("numComments", 0),
+        "shares": raw.get("repostsCount", 0) or raw.get("numShares", 0),
+        "created_at": raw.get("postedAtISO", None) or raw.get("postedAt", None) or raw.get("created_at", None),
+    }
+
+
+def score_linkedin_post(post: Dict[str, Any], keywords: List[str] = None) -> Dict[str, Any]:
+    """Score a LinkedIn post: log10(reactions+1)*0.40 + log10(comments+1)*0.35 + log10(shares+1)*0.25 + boosts."""
+    reactions = post.get("reactions", 0) or 0
+    comments = post.get("comments", 0) or 0
+    shares = post.get("shares", 0) or 0
+
+    base = (math.log10(reactions + 1) * 0.40 +
+            math.log10(comments + 1) * 0.35 +
+            math.log10(shares + 1) * 0.25)
+
+    recency_boost = 0.0
+    created_at = post.get("created_at")
+    if created_at:
+        try:
+            created_dt = date_parse(created_at)
+            if created_dt.tzinfo is None:
+                created_dt = created_dt.replace(tzinfo=datetime.timezone.utc)
+            days_old = (datetime.datetime.now(datetime.timezone.utc) - created_dt).days
+            if days_old <= 14:
+                recency_boost = 0.2
+            elif days_old <= 30:
+                recency_boost = 0.1
+        except Exception:
+            pass
+
+    relevance_boost = 0.0
+    if keywords:
+        text = post.get("text", "")
+        if text:
+            text_lower = text.lower()
+            overlap = sum(1 for kw in keywords if kw.lower() in text_lower)
+            relevance_boost = min(overlap * 0.05, 0.2)
+
+    post["base_score"] = base
+    post["recency_boost"] = recency_boost
+    post["relevance_boost"] = relevance_boost
+    post["final_score"] = base + recency_boost + relevance_boost
+    return post
+
+
+def process_linkedin_results(raw_results: List[Dict[str, Any]], keywords: List[str] = None) -> List[Dict[str, Any]]:
+    """Normalize → dedup → filter old → score → sort LinkedIn posts."""
+    normalized = [normalize_linkedin_result(r) for r in raw_results]
+    normalized = [n for n in normalized if n is not None]
+
+    seen = set()
+    deduped = []
+    for p in normalized:
+        pid = p.get("post_id")
+        if pid and pid not in seen:
+            seen.add(pid)
+            deduped.append(p)
+
+    filtered = filter_old_results(deduped, max_age_days=120)
+    scored = [score_linkedin_post(p, keywords) for p in filtered]
+    return sorted(scored, key=lambda x: x.get("final_score", 0), reverse=True)
+
+
+def select_top_linkedin_posts(scored: List[Dict[str, Any]], count: int = 3) -> List[Dict[str, Any]]:
+    """Select top N LinkedIn posts as examples."""
+    if not scored:
+        return []
+    examples = []
+    for post in scored[:count]:
+        examples.append({
+            "url": post["url"],
+            "text": post["text"],
+            "author": post["author"],
+            "reactions": post["reactions"],
+            "comments": post["comments"],
+            "shares": post["shares"],
+            "created_at": post["created_at"],
+            "final_score": post["final_score"],
+        })
+    return examples
+
+
+def generate_linkedin_content(idea: ContentIdea, examples: List[Dict[str, Any]], client=None) -> Dict[str, Any]:
+    """Generate LinkedIn content via LLM: draft_post, reference_notes, remix_ideas."""
+    empty = {"draft_post": "", "reference_notes": "", "remix_ideas": ""}
+
+    if client is None:
+        if not os.environ.get("OPENAI_API_KEY"):
+            return empty
+        client = openai.OpenAI()
+
+    system_message = (
+        "You are a LinkedIn content strategist for Logara, a startup documenting its founder journey. "
+        "You craft high-performing professional posts optimized for the LinkedIn algorithm. "
+        "Respond in valid JSON only."
+    )
+
+    examples_text = ""
+    for i, ex in enumerate(examples, 1):
+        examples_text += f"\nExample {i}:\n"
+        examples_text += f"  - Text: {ex.get('text', 'N/A')[:500]}\n"
+        examples_text += f"  - Reactions: {ex.get('reactions', 0):,} | Comments: {ex.get('comments', 0):,}\n"
+        examples_text += f"  - Author: {ex.get('author', 'unknown')}\n"
+
+    user_message = f"""Content Idea:
+- Type: {idea.content_type}
+- Topic: {idea.topic}
+- Description: {idea.description}
+
+Top Example LinkedIn Posts:{examples_text}
+
+Brand Context:
+- Logara is a startup documenting its founder journey
+- Tone: Professional but authentic, insightful, conversational
+
+LinkedIn Algorithm Best Practices (YOU MUST follow these):
+- HOOK (first 2-3 lines before "see more"): Use a contrarian take, a surprising stat, or start mid-story to create a curiosity gap. This is the most important part — if the hook fails, nobody reads the rest.
+- FORMAT: Short paragraphs (1-2 sentences max). Use line breaks liberally. Write at 5th-8th grade reading level. No walls of text.
+- DWELL TIME: Structure the post so readers spend time on it — use lists, bold key phrases, or a narrative arc that builds.
+- CTA: End with a genuine question that invites thoughtful comments (5+ word comments are worth 2x a like to the algorithm). Never use engagement bait like "Like if you agree".
+- LENGTH: 150-300 words. Enough depth to be valuable, short enough to hold attention.
+- NO emojis overload, no hashtag spam. Max 3-5 hashtags at the end.
+
+Instructions:
+1. draft_post: A full LinkedIn post following the best practices above. Must have: a scroll-stopping hook, short-paragraph body with real insight, and a comment-driving question at the end.
+2. reference_notes: For each example, one sentence on why it works and what to learn
+3. remix_ideas: 2-3 post angle ideas as one-liner bullets
+
+Return JSON:
+{{
+  "draft_post": "the full linkedin post text",
+  "reference_notes": ["note for ex1", "note for ex2", "note for ex3"],
+  "remix_ideas": ["angle 1", "angle 2", "angle 3"]
+}}"""
+
+    def make_api_call():
+        return client.chat.completions.create(
+            model="gpt-4o-mini",
+            response_format={"type": "json_object"},
+            temperature=0.8,
+            max_tokens=1000,
+            messages=[
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": user_message}
+            ]
+        )
+
+    try:
+        response = _call_with_retry(make_api_call)
+        if not response or response == []:
+            return empty
+
+        parsed = json.loads(response.choices[0].message.content)
+        ref_notes = parsed.get("reference_notes", [])
+        remix_list = parsed.get("remix_ideas", [])
+
+        return {
+            "draft_post": parsed.get("draft_post", ""),
+            "reference_notes": "\n".join(f"- {n}" for n in ref_notes) if ref_notes else "",
+            "remix_ideas": "\n".join(f"- {r}" for r in remix_list) if remix_list else "",
+        }
+    except (json.JSONDecodeError, KeyError, IndexError, AttributeError) as e:
+        print(f"Error parsing LinkedIn LLM response: {e}", file=sys.stderr)
+        return empty
+
+
+def enrich_row_linkedin(idea: ContentIdea, raw_results: List[Dict[str, Any]], openai_client=None) -> Dict[str, Any]:
+    """Orchestrate full LinkedIn enrichment pipeline for a single row."""
+    keywords = extract_keywords(idea.topic) + extract_keywords(idea.description)
+    scored = process_linkedin_results(raw_results, keywords=keywords)
+    examples = select_top_linkedin_posts(scored)
+
+    enrich_status = "ok"
+    enrich_reason = ""
+
+    if len(scored) == 0:
+        # No API results — generate content from idea alone (LLM-only fallback)
+        llm = generate_linkedin_content(idea, [], client=openai_client)
+        llm_has_content = any(llm.get(k, "") for k in ["draft_post", "remix_ideas"])
+        if llm_has_content:
+            enrich_status = "partial"
+            enrich_reason = "LLM-only (no API results)"
+        else:
+            enrich_status = "skipped"
+            enrich_reason = "No API results and LLM generation failed"
+    else:
+        llm = generate_linkedin_content(idea, examples, client=openai_client)
+        llm_failed = all(llm.get(k, "") == "" for k in ["draft_post", "reference_notes", "remix_ideas"])
+        reasons = []
+        if llm_failed:
+            reasons.append("LLM generation failed")
+        if len(examples) < 2:
+            reasons.append(f"Only {len(examples)} example(s), need >=2")
+        if reasons:
+            enrich_status = "partial"
+            enrich_reason = "; ".join(reasons)
+
+    return {
+        "row_number": idea.row_number,
+        "content_type": idea.content_type,
+        "topic": idea.topic,
+        "examples": examples,
+        "draft_post": llm.get("draft_post", ""),
+        "reference_notes": llm.get("reference_notes", ""),
+        "remix_ideas": llm.get("remix_ideas", ""),
+        "enrich_status": enrich_status,
+        "enrich_reason": enrich_reason,
+        "total_results": len(raw_results),
+        "scored_results": len(scored),
+        "queries": generate_linkedin_queries(idea),
+    }
+
+
+# ---------------------------------------------------------------------------
+# TikTok LLM content generation (original)
+# ---------------------------------------------------------------------------
+
 def generate_llm_content(idea: ContentIdea, examples: List[Dict[str, Any]], audio: Dict[str, Any], client=None) -> Dict[str, Any]:
     """
     Generate LLM content for enrichment: audio_fit_reason, hook_summaries, remix_ideas.
@@ -913,7 +1465,8 @@ def generate_llm_content(idea: ContentIdea, examples: List[Dict[str, Any]], audi
                 "ex1_hook_summary": "",
                 "ex2_hook_summary": "",
                 "ex3_hook_summary": "",
-                "remix_ideas": ""
+                "remix_ideas": "",
+                "hook_scripts": ""
             }
         client = openai.OpenAI()  # Reads OPENAI_API_KEY from env automatically
 
@@ -972,12 +1525,14 @@ Instructions:
 1. audio_fit_reason: One sentence about the audio's GENERAL vibe and usage potential (not tied to this specific idea). {audio_instruction}
 2. hook_summaries: For each example, write 2 sentences: (a) what the video did (reference the caption), (b) why it works/what to learn
 3. remix_ideas: 2-3 filmable one-liner bullets tailored to {idea.content_type} format. Concrete actions, not abstract advice.
+4. hook_scripts: 2-3 short hook opening lines (first 3 seconds of a video) tailored to this content idea. Each hook should be a single sentence the founder can say to camera.
 
 Return JSON:
 {{
   "audio_fit_reason": "one sentence",
   "hook_summaries": ["2 sentences for ex1", "2 sentences for ex2", "2 sentences for ex3"],
-  "remix_ideas": ["bullet 1", "bullet 2", "bullet 3"]
+  "remix_ideas": ["bullet 1", "bullet 2", "bullet 3"],
+  "hook_scripts": ["hook line 1", "hook line 2", "hook line 3"]
 }}"""
 
     # Step 3: Define API call function for retry wrapper
@@ -986,7 +1541,7 @@ Return JSON:
             model="gpt-4o-mini",
             response_format={"type": "json_object"},
             temperature=0.8,
-            max_tokens=500,
+            max_tokens=700,
             messages=[
                 {"role": "system", "content": system_message},
                 {"role": "user", "content": user_message}
@@ -1005,7 +1560,8 @@ Return JSON:
                 "ex1_hook_summary": "",
                 "ex2_hook_summary": "",
                 "ex3_hook_summary": "",
-                "remix_ideas": ""
+                "remix_ideas": "",
+                "hook_scripts": ""
             }
 
         # Step 5: Parse response
@@ -1016,6 +1572,7 @@ Return JSON:
         audio_fit_reason = parsed.get("audio_fit_reason", "")
         hook_summaries = parsed.get("hook_summaries", [])
         remix_ideas_list = parsed.get("remix_ideas", [])
+        hook_scripts_list = parsed.get("hook_scripts", [])
 
         # Format remix_ideas as bulleted string
         if remix_ideas_list:
@@ -1023,13 +1580,20 @@ Return JSON:
         else:
             remix_ideas = ""
 
+        # Format hook_scripts as bulleted string
+        if hook_scripts_list:
+            hook_scripts = "\n".join(f"- {h}" for h in hook_scripts_list)
+        else:
+            hook_scripts = ""
+
         # Step 6: Return structured dict
         return {
             "audio_fit_reason": audio_fit_reason,
             "ex1_hook_summary": hook_summaries[0] if len(hook_summaries) > 0 else "",
             "ex2_hook_summary": hook_summaries[1] if len(hook_summaries) > 1 else "",
             "ex3_hook_summary": hook_summaries[2] if len(hook_summaries) > 2 else "",
-            "remix_ideas": remix_ideas
+            "remix_ideas": remix_ideas,
+            "hook_scripts": hook_scripts
         }
 
     except (json.JSONDecodeError, KeyError, IndexError, AttributeError) as e:
@@ -1039,7 +1603,8 @@ Return JSON:
             "ex1_hook_summary": "",
             "ex2_hook_summary": "",
             "ex3_hook_summary": "",
-            "remix_ideas": ""
+            "remix_ideas": "",
+            "hook_scripts": ""
         }
 
 
@@ -1062,13 +1627,6 @@ def enrich_row(idea: ContentIdea, raw_results: List[Dict[str, Any]], openai_clie
         result counts, and queries used.
     """
     # Step 1: Extract keywords for relevance scoring
-    # Reuse keyword extraction logic from generate_queries
-    def extract_keywords(text: str) -> List[str]:
-        words = text.lower().split()
-        stop_words = {'the', 'and', 'for', 'with', 'from', 'this', 'that', 'what', 'when', 'where', 'who', 'how', 'why'}
-        keywords = [w for w in words if len(w) > 3 and w not in stop_words]
-        return keywords
-
     topic_keywords = extract_keywords(idea.topic)
     desc_keywords = extract_keywords(idea.description)
     keywords = topic_keywords + desc_keywords
@@ -1093,7 +1651,8 @@ def enrich_row(idea: ContentIdea, raw_results: List[Dict[str, Any]], openai_clie
             "ex1_hook_summary": "",
             "ex2_hook_summary": "",
             "ex3_hook_summary": "",
-            "remix_ideas": ""
+            "remix_ideas": "",
+            "hook_scripts": ""
         }
         enrich_status = "skipped"
         enrich_reason = "No scored results"
@@ -1105,7 +1664,7 @@ def enrich_row(idea: ContentIdea, raw_results: List[Dict[str, Any]], openai_clie
         llm_failed = all(
             llm_content.get(key, "") == ""
             for key in ["audio_fit_reason", "ex1_hook_summary", "ex2_hook_summary",
-                       "ex3_hook_summary", "remix_ideas"]
+                       "ex3_hook_summary", "remix_ideas", "hook_scripts"]
         )
 
         # Determine status based on LOG-01 criteria
@@ -1140,6 +1699,7 @@ def enrich_row(idea: ContentIdea, raw_results: List[Dict[str, Any]], openai_clie
         "ex2_audio_title": examples[1]["audio_title"] if len(examples) > 1 else "",
         "ex3_audio_title": examples[2]["audio_title"] if len(examples) > 2 else "",
         "remix_ideas": llm_content.get("remix_ideas", ""),
+        "hook_scripts": llm_content.get("hook_scripts", ""),
         "enrich_status": enrich_status,
         "enrich_reason": enrich_reason,
         "total_results": len(raw_results),
@@ -1148,236 +1708,277 @@ def enrich_row(idea: ContentIdea, raw_results: List[Dict[str, Any]], openai_clie
     }
 
 
-def write_enriched_excel(ideas: List[ContentIdea], enrichments: List[Dict[str, Any]], output_path: str) -> None:
-    """
-    Write enriched content ideas to Excel with styled headers and grouped columns.
+def _style_sheet(ws, wrap_columns: List[str] = None) -> None:
+    """Apply shared styling to a worksheet: bold headers, freeze panes, auto-width."""
+    headers = [cell.value for cell in ws[1]]
 
-    Args:
-        ideas: List of original ContentIdea objects
-        enrichments: List of enrichment dicts from enrich_row()
-        output_path: Path to write output Excel file
-
-    Column layout (grouped by concern):
-    1. INPUT: Day, Date, Type, Topic, Description
-    2. QUERY: Topic Keywords, Search Queries
-    3. EXAMPLE 1: Ex1 URL, Ex1 Views, Ex1 Likes, Ex1 Comments, Ex1 Shares, Ex1 Author, Ex1 Caption, Ex1 Audio, Ex1 Hook Summary
-    4. EXAMPLE 2: Ex2 URL, Ex2 Views, Ex2 Likes, Ex2 Comments, Ex2 Shares, Ex2 Author, Ex2 Caption, Ex2 Audio, Ex2 Hook Summary
-    5. EXAMPLE 3: Ex3 URL, Ex3 Views, Ex3 Likes, Ex3 Comments, Ex3 Shares, Ex3 Author, Ex3 Caption, Ex3 Audio, Ex3 Hook Summary
-    6. AUDIO: Audio Title, Audio Author, Audio Confidence, Audio URL, Audio Fit Reason
-    7. LLM: Remix Ideas
-    8. STATUS: Enrich Status, Enrich Reason
-    """
-    # Create workbook
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Enriched Content"
-
-    # Define column headers in order
-    headers = [
-        # INPUT GROUP
-        "Day", "Date", "Type", "Topic", "Description",
-        # QUERY GROUP
-        "Topic Keywords", "Search Queries",
-        # EXAMPLE 1
-        "Ex1 URL", "Ex1 Views", "Ex1 Likes", "Ex1 Comments", "Ex1 Shares",
-        "Ex1 Author", "Ex1 Caption", "Ex1 Audio", "Ex1 Hook Summary",
-        # EXAMPLE 2
-        "Ex2 URL", "Ex2 Views", "Ex2 Likes", "Ex2 Comments", "Ex2 Shares",
-        "Ex2 Author", "Ex2 Caption", "Ex2 Audio", "Ex2 Hook Summary",
-        # EXAMPLE 3
-        "Ex3 URL", "Ex3 Views", "Ex3 Likes", "Ex3 Comments", "Ex3 Shares",
-        "Ex3 Author", "Ex3 Caption", "Ex3 Audio", "Ex3 Hook Summary",
-        # AUDIO GROUP
-        "Audio Title", "Audio Author", "Audio Confidence", "Audio URL", "Audio Fit Reason",
-        # LLM GROUP
-        "Remix Ideas",
-        # STATUS GROUP
-        "Enrich Status", "Enrich Reason"
-    ]
-
-    # Write header row
-    ws.append(headers)
-
-    # Create enrichment lookup by row_number
-    enrichment_map = {e["row_number"]: e for e in enrichments}
-
-    # Write data rows
-    for idea in ideas:
-        enrichment = enrichment_map.get(idea.row_number, {})
-
-        # Get examples
-        examples = enrichment.get("examples", [])
-        ex1 = examples[0] if len(examples) > 0 else {}
-        ex2 = examples[1] if len(examples) > 1 else {}
-        ex3 = examples[2] if len(examples) > 2 else {}
-
-        # Get audio
-        audio = enrichment.get("audio", {})
-
-        # Build row data
-        row_data = [
-            # INPUT GROUP
-            idea.date.strftime("%A"),  # Day
-            idea.date.strftime("%Y-%m-%d"),  # Date (normalized)
-            idea.content_type,  # Type
-            idea.topic,  # Topic
-            idea.description,  # Description
-
-            # QUERY GROUP
-            ", ".join(enrichment.get("topic_keywords", [])),  # Topic Keywords
-            " | ".join(enrichment.get("queries", [])),  # Search Queries
-
-            # EXAMPLE 1
-            ex1.get("url", ""),
-            ex1.get("views", ""),
-            ex1.get("likes", ""),
-            ex1.get("comments", ""),
-            ex1.get("shares", ""),
-            ex1.get("author_username", ""),
-            ex1.get("caption", ""),
-            ex1.get("audio_title", ""),
-            enrichment.get("ex1_hook_summary", ""),
-
-            # EXAMPLE 2
-            ex2.get("url", ""),
-            ex2.get("views", ""),
-            ex2.get("likes", ""),
-            ex2.get("comments", ""),
-            ex2.get("shares", ""),
-            ex2.get("author_username", ""),
-            ex2.get("caption", ""),
-            ex2.get("audio_title", ""),
-            enrichment.get("ex2_hook_summary", ""),
-
-            # EXAMPLE 3
-            ex3.get("url", ""),
-            ex3.get("views", ""),
-            ex3.get("likes", ""),
-            ex3.get("comments", ""),
-            ex3.get("shares", ""),
-            ex3.get("author_username", ""),
-            ex3.get("caption", ""),
-            ex3.get("audio_title", ""),
-            enrichment.get("ex3_hook_summary", ""),
-
-            # AUDIO GROUP
-            audio.get("audio_title", ""),
-            audio.get("audio_author", ""),
-            audio.get("audio_confidence", ""),
-            audio.get("audio_url", ""),
-            enrichment.get("audio_fit_reason", ""),
-
-            # LLM GROUP
-            enrichment.get("remix_ideas", ""),
-
-            # STATUS GROUP
-            enrichment.get("enrich_status", ""),
-            enrichment.get("enrich_reason", "")
-        ]
-
-        ws.append(row_data)
-
-    # Apply header styling
+    # Bold headers
     for cell in ws[1]:
         cell.font = Font(bold=True)
 
     # Freeze header row
     ws.freeze_panes = "A2"
 
-    # Apply wrap_text to Remix Ideas column (column index based on headers)
-    remix_ideas_col_idx = headers.index("Remix Ideas") + 1
-    for row_idx in range(2, ws.max_row + 1):
-        cell = ws.cell(row=row_idx, column=remix_ideas_col_idx)
-        cell.alignment = Alignment(wrap_text=True)
+    # Wrap text on specified columns
+    if wrap_columns:
+        for col_name in wrap_columns:
+            if col_name in headers:
+                col_idx = headers.index(col_name) + 1
+                for row_idx in range(2, ws.max_row + 1):
+                    cell = ws.cell(row=row_idx, column=col_idx)
+                    cell.alignment = Alignment(wrap_text=True)
 
     # Auto-fit column widths
     for col_idx, column_cells in enumerate(ws.columns, 1):
         col_letter = get_column_letter(col_idx)
-
-        # Find max content length in column
         max_length = 0
         for cell in column_cells:
             if cell.value:
-                cell_value_str = str(cell.value)
-                # Cap content length check at 50 chars
-                content_length = min(len(cell_value_str), 50)
+                content_length = min(len(str(cell.value)), 50)
                 max_length = max(max_length, content_length)
+        ws.column_dimensions[col_letter].width = max_length + 2
 
-        # Set column width (add padding)
-        adjusted_width = max_length + 2
-        ws.column_dimensions[col_letter].width = adjusted_width
 
-    # Save workbook
+def write_enriched_excel(ideas: List[ContentIdea], enrichments: List[Dict[str, Any]],
+                         output_path: str,
+                         twitter_enrichments: List[Dict[str, Any]] = None,
+                         linkedin_enrichments: List[Dict[str, Any]] = None) -> None:
+    """
+    Write enriched content to Excel with 3 sheets: TikTok, Twitter, LinkedIn.
+
+    Args:
+        ideas: List of original ContentIdea objects
+        enrichments: List of TikTok enrichment dicts from enrich_row()
+        output_path: Path to write output Excel file
+        twitter_enrichments: List of Twitter enrichment dicts from enrich_row_twitter()
+        linkedin_enrichments: List of LinkedIn enrichment dicts from enrich_row_linkedin()
+    """
+    wb = Workbook()
+
+    # ---- Sheet 1: TikTok ----
+    ws_tiktok = wb.active
+    ws_tiktok.title = "TikTok"
+
+    tiktok_headers = [
+        "Day", "Date", "Type", "Topic", "Description",
+        "Topic Keywords", "Search Queries",
+        "Ex1 URL", "Ex1 Views", "Ex1 Likes", "Ex1 Comments", "Ex1 Shares",
+        "Ex1 Author", "Ex1 Caption", "Ex1 Audio", "Ex1 Hook Summary",
+        "Ex2 URL", "Ex2 Views", "Ex2 Likes", "Ex2 Comments", "Ex2 Shares",
+        "Ex2 Author", "Ex2 Caption", "Ex2 Audio", "Ex2 Hook Summary",
+        "Ex3 URL", "Ex3 Views", "Ex3 Likes", "Ex3 Comments", "Ex3 Shares",
+        "Ex3 Author", "Ex3 Caption", "Ex3 Audio", "Ex3 Hook Summary",
+        "Audio Title", "Audio Author", "Audio Confidence", "Audio URL", "Audio Fit Reason",
+        "Remix Ideas", "Hook Scripts",
+        "Enrich Status", "Enrich Reason"
+    ]
+    ws_tiktok.append(tiktok_headers)
+
+    enrichment_map = {e["row_number"]: e for e in enrichments}
+    for idea in ideas:
+        e = enrichment_map.get(idea.row_number, {})
+        examples = e.get("examples", [])
+        ex1 = examples[0] if len(examples) > 0 else {}
+        ex2 = examples[1] if len(examples) > 1 else {}
+        ex3 = examples[2] if len(examples) > 2 else {}
+        audio = e.get("audio", {})
+
+        ws_tiktok.append([
+            idea.date.strftime("%A"), idea.date.strftime("%Y-%m-%d"),
+            idea.content_type, idea.topic, idea.description,
+            ", ".join(e.get("topic_keywords", [])),
+            " | ".join(e.get("queries", [])),
+            ex1.get("url", ""), ex1.get("views", ""), ex1.get("likes", ""),
+            ex1.get("comments", ""), ex1.get("shares", ""),
+            ex1.get("author_username", ""), ex1.get("caption", ""),
+            ex1.get("audio_title", ""), e.get("ex1_hook_summary", ""),
+            ex2.get("url", ""), ex2.get("views", ""), ex2.get("likes", ""),
+            ex2.get("comments", ""), ex2.get("shares", ""),
+            ex2.get("author_username", ""), ex2.get("caption", ""),
+            ex2.get("audio_title", ""), e.get("ex2_hook_summary", ""),
+            ex3.get("url", ""), ex3.get("views", ""), ex3.get("likes", ""),
+            ex3.get("comments", ""), ex3.get("shares", ""),
+            ex3.get("author_username", ""), ex3.get("caption", ""),
+            ex3.get("audio_title", ""), e.get("ex3_hook_summary", ""),
+            audio.get("audio_title", ""), audio.get("audio_author", ""),
+            audio.get("audio_confidence", ""), audio.get("audio_url", ""),
+            e.get("audio_fit_reason", ""),
+            e.get("remix_ideas", ""), e.get("hook_scripts", ""),
+            e.get("enrich_status", ""), e.get("enrich_reason", ""),
+        ])
+
+    _style_sheet(ws_tiktok, wrap_columns=["Remix Ideas", "Hook Scripts"])
+
+    # ---- Sheet 2: Twitter ----
+    ws_twitter = wb.create_sheet("Twitter")
+
+    twitter_headers = [
+        "Day", "Date", "Type", "Topic", "Description", "Search Queries",
+        "Draft Tweet", "Thread Structure",
+        "Ex1 URL", "Ex1 Text", "Ex1 Likes", "Ex1 Retweets", "Ex1 Author",
+        "Ex2 URL", "Ex2 Text", "Ex2 Likes", "Ex2 Retweets", "Ex2 Author",
+        "Ex3 URL", "Ex3 Text", "Ex3 Likes", "Ex3 Retweets", "Ex3 Author",
+        "Reference Notes", "Remix Ideas",
+        "Enrich Status", "Enrich Reason"
+    ]
+    ws_twitter.append(twitter_headers)
+
+    tw_map = {e["row_number"]: e for e in (twitter_enrichments or [])}
+    for idea in ideas:
+        te = tw_map.get(idea.row_number, {})
+        examples = te.get("examples", [])
+        ex1 = examples[0] if len(examples) > 0 else {}
+        ex2 = examples[1] if len(examples) > 1 else {}
+        ex3 = examples[2] if len(examples) > 2 else {}
+
+        ws_twitter.append([
+            idea.date.strftime("%A"), idea.date.strftime("%Y-%m-%d"),
+            idea.content_type, idea.topic, idea.description,
+            " | ".join(te.get("queries", [])),
+            te.get("draft_tweet", ""), te.get("thread_structure", ""),
+            ex1.get("url", ""), ex1.get("text", ""), ex1.get("likes", ""),
+            ex1.get("retweets", ""), ex1.get("author", ""),
+            ex2.get("url", ""), ex2.get("text", ""), ex2.get("likes", ""),
+            ex2.get("retweets", ""), ex2.get("author", ""),
+            ex3.get("url", ""), ex3.get("text", ""), ex3.get("likes", ""),
+            ex3.get("retweets", ""), ex3.get("author", ""),
+            te.get("reference_notes", ""), te.get("remix_ideas", ""),
+            te.get("enrich_status", ""), te.get("enrich_reason", ""),
+        ])
+
+    _style_sheet(ws_twitter, wrap_columns=["Draft Tweet", "Thread Structure", "Reference Notes", "Remix Ideas"])
+
+    # ---- Sheet 3: LinkedIn ----
+    ws_linkedin = wb.create_sheet("LinkedIn")
+
+    linkedin_headers = [
+        "Day", "Date", "Type", "Topic", "Description", "Search Queries",
+        "Draft Post",
+        "Ex1 URL", "Ex1 Text", "Ex1 Reactions", "Ex1 Comments", "Ex1 Author",
+        "Ex2 URL", "Ex2 Text", "Ex2 Reactions", "Ex2 Comments", "Ex2 Author",
+        "Ex3 URL", "Ex3 Text", "Ex3 Reactions", "Ex3 Comments", "Ex3 Author",
+        "Reference Notes", "Remix Ideas",
+        "Enrich Status", "Enrich Reason"
+    ]
+    ws_linkedin.append(linkedin_headers)
+
+    li_map = {e["row_number"]: e for e in (linkedin_enrichments or [])}
+    for idea in ideas:
+        le = li_map.get(idea.row_number, {})
+        examples = le.get("examples", [])
+        ex1 = examples[0] if len(examples) > 0 else {}
+        ex2 = examples[1] if len(examples) > 1 else {}
+        ex3 = examples[2] if len(examples) > 2 else {}
+
+        ws_linkedin.append([
+            idea.date.strftime("%A"), idea.date.strftime("%Y-%m-%d"),
+            idea.content_type, idea.topic, idea.description,
+            " | ".join(le.get("queries", [])),
+            le.get("draft_post", ""),
+            ex1.get("url", ""), ex1.get("text", ""), ex1.get("reactions", ""),
+            ex1.get("comments", ""), ex1.get("author", ""),
+            ex2.get("url", ""), ex2.get("text", ""), ex2.get("reactions", ""),
+            ex2.get("comments", ""), ex2.get("author", ""),
+            ex3.get("url", ""), ex3.get("text", ""), ex3.get("reactions", ""),
+            ex3.get("comments", ""), ex3.get("author", ""),
+            le.get("reference_notes", ""), le.get("remix_ideas", ""),
+            le.get("enrich_status", ""), le.get("enrich_reason", ""),
+        ])
+
+    _style_sheet(ws_linkedin, wrap_columns=["Draft Post", "Reference Notes", "Remix Ideas"])
+
     wb.save(output_path)
 
 
 def build_run_log(ideas: List[ContentIdea], enrichments: List[Dict[str, Any]],
-                  input_path: str, output_path: str, start_time: float, end_time: float) -> Dict[str, Any]:
+                  input_path: str, output_path: str, start_time: float, end_time: float,
+                  twitter_enrichments: List[Dict[str, Any]] = None,
+                  linkedin_enrichments: List[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
-    Build complete run log with summary and per-row diagnostics.
+    Build complete run log with summary and per-row diagnostics for all platforms.
 
     Args:
         ideas: List of original ContentIdea objects
-        enrichments: List of enrichment dicts from enrich_row()
+        enrichments: List of TikTok enrichment dicts from enrich_row()
         input_path: Path to input Excel file
         output_path: Path to output Excel file
         start_time: time.time() at run start
         end_time: time.time() at run end
+        twitter_enrichments: List of Twitter enrichment dicts
+        linkedin_enrichments: List of LinkedIn enrichment dicts
 
     Returns:
-        Dict with run_summary and rows array
+        Dict with run_summary and rows array (each row has tiktok/twitter/linkedin sections)
     """
-    # Build run_summary
     timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
     duration_seconds = round(end_time - start_time, 1)
 
-    # Count status values
-    status_counts = {"ok": 0, "partial": 0, "skipped": 0, "error": 0}
-    for enrichment in enrichments:
-        status = enrichment.get("enrich_status", "error")
-        if status in status_counts:
-            status_counts[status] += 1
-        else:
-            status_counts["error"] += 1
+    # Count status values per platform
+    def count_statuses(enrich_list):
+        counts = {"ok": 0, "partial": 0, "skipped": 0, "error": 0}
+        for e in enrich_list:
+            s = e.get("enrich_status", "error")
+            counts[s] = counts.get(s, 0) + 1
+        return counts
+
+    tiktok_status = count_statuses(enrichments)
+    twitter_status = count_statuses(twitter_enrichments or [])
+    linkedin_status = count_statuses(linkedin_enrichments or [])
 
     run_summary = {
         "timestamp": timestamp,
         "input_file": os.path.basename(input_path),
         "output_file": os.path.basename(output_path),
         "total_rows": len(ideas),
-        "status_counts": status_counts,
+        "tiktok_status_counts": tiktok_status,
+        "twitter_status_counts": twitter_status,
+        "linkedin_status_counts": linkedin_status,
         "duration_seconds": duration_seconds
     }
 
     # Build rows array
     rows = []
-    enrichment_map = {e["row_number"]: e for e in enrichments}
+    tiktok_map = {e["row_number"]: e for e in enrichments}
+    tw_map = {e["row_number"]: e for e in (twitter_enrichments or [])}
+    li_map = {e["row_number"]: e for e in (linkedin_enrichments or [])}
 
     for idea in ideas:
-        enrichment = enrichment_map.get(idea.row_number, {})
+        tk = tiktok_map.get(idea.row_number, {})
+        tw = tw_map.get(idea.row_number, {})
+        li = li_map.get(idea.row_number, {})
 
-        # Extract chosen audio info
-        audio = enrichment.get("audio", {})
-        chosen_audio = {
-            "title": audio.get("audio_title", ""),
-            "confidence": audio.get("audio_confidence", "")
-        }
-
-        # Extract example URLs (up to 3)
-        examples = enrichment.get("examples", [])
-        example_urls = [ex.get("url", "") for ex in examples[:3]]
+        audio = tk.get("audio", {})
+        tk_examples = tk.get("examples", [])
 
         row_data = {
             "row_number": idea.row_number,
             "content_type": idea.content_type,
             "topic": idea.topic,
-            "queries": enrichment.get("queries", []),
-            "total_results": enrichment.get("total_results", 0),
-            "scored_results": enrichment.get("scored_results", 0),
-            "chosen_audio": chosen_audio,
-            "example_urls": example_urls,
-            "enrich_status": enrichment.get("enrich_status", "error"),
-            "enrich_reason": enrichment.get("enrich_reason", "")
+            "tiktok": {
+                "queries": tk.get("queries", []),
+                "total_results": tk.get("total_results", 0),
+                "scored_results": tk.get("scored_results", 0),
+                "chosen_audio": {"title": audio.get("audio_title", ""), "confidence": audio.get("audio_confidence", "")},
+                "example_urls": [ex.get("url", "") for ex in tk_examples[:3]],
+                "enrich_status": tk.get("enrich_status", "error"),
+                "enrich_reason": tk.get("enrich_reason", ""),
+            },
+            "twitter": {
+                "queries": tw.get("queries", []),
+                "total_results": tw.get("total_results", 0),
+                "scored_results": tw.get("scored_results", 0),
+                "example_urls": [ex.get("url", "") for ex in tw.get("examples", [])[:3]],
+                "enrich_status": tw.get("enrich_status", "error"),
+                "enrich_reason": tw.get("enrich_reason", ""),
+            },
+            "linkedin": {
+                "queries": li.get("queries", []),
+                "total_results": li.get("total_results", 0),
+                "scored_results": li.get("scored_results", 0),
+                "example_urls": [ex.get("url", "") for ex in li.get("examples", [])[:3]],
+                "enrich_status": li.get("enrich_status", "error"),
+                "enrich_reason": li.get("enrich_reason", ""),
+            },
         }
         rows.append(row_data)
 
@@ -1402,10 +2003,13 @@ def save_run_log(run_log: Dict[str, Any], log_path: str) -> None:
 def main():
     """
     Main CLI entry point for content calendar enrichment.
+
+    Enriches each content idea across TikTok, Twitter, and LinkedIn.
+    Output: Excel with 3 sheets + run_log.json.
     """
     # Step 1: Parse args
     parser = argparse.ArgumentParser(
-        description="Enrich a content calendar with TikTok trends, audio picks, and remix ideas."
+        description="Enrich a content calendar with TikTok, Twitter, and LinkedIn trends."
     )
     parser.add_argument("--input", default="Content ideas.xlsx",
         help="Path to input Excel file (default: Content ideas.xlsx)")
@@ -1413,6 +2017,10 @@ def main():
         help="Path to output Excel file (default: Enriched <input>_YYYY-MM-DD.xlsx)")
     parser.add_argument("--dry-run", action="store_true",
         help="Validate input and show what would be processed without making API calls")
+    parser.add_argument("--max-rows", type=int, default=None,
+        help="Limit processing to first N rows (useful for testing)")
+    parser.add_argument("--estimate", action="store_true",
+        help="Show projected Apify cost and confirm before running")
 
     args = parser.parse_args()
 
@@ -1421,11 +2029,11 @@ def main():
         print(f"Error: Input file not found: {args.input}", file=sys.stderr)
         sys.exit(1)
 
-    # Step 3: Environment variable check (skip for --dry-run)
-    if not args.dry_run:
+    # Step 3: Environment variable check (skip for --dry-run and --estimate)
+    if not args.dry_run and not args.estimate:
         missing_vars = []
-        if not os.environ.get("APIFY_TOKEN"):
-            missing_vars.append("APIFY_TOKEN")
+        if not os.environ.get("RAPIDAPI_KEY"):
+            missing_vars.append("RAPIDAPI_KEY")
         if not os.environ.get("OPENAI_API_KEY"):
             missing_vars.append("OPENAI_API_KEY")
 
@@ -1440,91 +2048,151 @@ def main():
     if skipped:
         print(f"Skipped {len(skipped)} rows with missing fields")
 
+    # Step 4b: Apply --max-rows limit
+    if args.max_rows is not None and args.max_rows > 0:
+        ideas = ideas[:args.max_rows]
+        print(f"Limited to first {len(ideas)} rows (--max-rows {args.max_rows})")
+
     # Step 5: Handle --dry-run
     if args.dry_run:
+        print(f"\nPlatforms: TikTok, Twitter, LinkedIn")
         for idea in ideas:
             print(f"  Row {idea.row_number}: {idea.content_type} | {idea.topic}")
-        print(f"\nDry run complete. {len(ideas)} rows would be processed.")
+        print(f"\nDry run complete. {len(ideas)} rows x 3 platforms would be processed.")
         if skipped:
             for skip_info in skipped:
                 print(f"  Would skip row {skip_info['row_number']}: missing {skip_info['field']}")
         sys.exit(0)
 
-    # Step 6: Process rows
+    # Step 5b: Handle --estimate
+    if args.estimate:
+        api_rows = [idea for idea in ideas if has_enough_context(idea)]
+        llm_only_rows = len(ideas) - len(api_rows)
+        tk_queries = len(api_rows) * 3
+        tw_queries = len(api_rows) * 3
+        tk_requests = tk_queries  # 1 RapidAPI request per query
+        tw_requests = tw_queries  # 1 RapidAPI request per query
+
+        print(f"\nEstimated API usage for {len(ideas)} rows:")
+        print(f"  API rows:      {len(api_rows)} (LLM-only: {llm_only_rows})")
+        print(f"  TikTok:   {tk_queries} queries = {tk_requests} RapidAPI requests (free tier)")
+        print(f"  Twitter:  {tw_queries} queries = {tw_requests} RapidAPI requests (free: 1000/month)")
+        print(f"  LinkedIn: LLM-only (no API calls)")
+        print(f"  Total RapidAPI requests: {tk_requests + tw_requests}")
+        print(f"  Cost: $0.00 (RapidAPI free tier)")
+
+        confirm = input("\nProceed? [y/N] ").strip().lower()
+        if confirm != "y":
+            print("Aborted.")
+            sys.exit(0)
+
+    # Step 6: Process rows across all platforms
     start_time = time.time()
-    enrichments = []
-    openai_client = openai.OpenAI()  # Create once, reuse for all rows
+    tiktok_enrichments = []
+    twitter_enrichments = []
+    linkedin_enrichments = []
+    openai_client = openai.OpenAI()
 
     for i, idea in enumerate(ideas, 1):
+        print(f"\nRow {i}/{len(ideas)}: {idea.content_type} | {idea.topic}")
+        use_api = has_enough_context(idea)
+        if not use_api:
+            print(f"  Low context — LLM-only mode (saving API costs)")
+
+        # --- TikTok ---
         try:
-            # Generate queries
-            queries = generate_queries(idea)
-
-            # Fetch TikTok results
-            raw_results = fetch_tiktok_results(queries)
-
-            # Enrich row (process results + select examples + audio + LLM)
-            enriched = enrich_row(idea, raw_results, openai_client=openai_client)
-            enrichments.append(enriched)
-
-            # Progress output
-            status = enriched.get("enrich_status", "ok")
-            print(f"Row {i}/{len(ideas)}: {idea.content_type} | {idea.topic}... {status}")
-
+            tiktok_queries = generate_queries(idea)
+            tiktok_raw = fetch_tiktok_results(tiktok_queries) if use_api else []
+            tiktok_enriched = enrich_row(idea, tiktok_raw, openai_client=openai_client)
+            tiktok_enrichments.append(tiktok_enriched)
+            print(f"  TikTok: {tiktok_enriched.get('enrich_status', 'ok')}")
         except Exception as e:
-            # On per-row failure: log error, continue processing
-            print(f"Row {i}/{len(ideas)}: {idea.content_type} | {idea.topic}... error", file=sys.stderr)
-            print(f"  Error: {e}", file=sys.stderr)
-            enrichments.append({
-                "row_number": idea.row_number,
-                "content_type": idea.content_type,
-                "topic": idea.topic,
-                "topic_keywords": [],
-                "examples": [],
+            print(f"  TikTok: error - {e}", file=sys.stderr)
+            tiktok_enrichments.append({
+                "row_number": idea.row_number, "content_type": idea.content_type,
+                "topic": idea.topic, "topic_keywords": [], "examples": [],
                 "audio": {"audio_title": "", "audio_author": "", "audio_id": "", "audio_url": "", "audio_confidence": "low"},
                 "audio_fit_reason": "",
                 "ex1_hook_summary": "", "ex2_hook_summary": "", "ex3_hook_summary": "",
                 "ex1_audio_title": "", "ex2_audio_title": "", "ex3_audio_title": "",
-                "remix_ideas": "",
-                "enrich_status": "error",
-                "enrich_reason": str(e),
-                "total_results": 0,
-                "scored_results": 0,
-                "queries": []
+                "remix_ideas": "", "hook_scripts": "",
+                "enrich_status": "error", "enrich_reason": str(e),
+                "total_results": 0, "scored_results": 0, "queries": [],
+            })
+
+        # --- Twitter ---
+        try:
+            twitter_queries = generate_twitter_queries(idea)
+            twitter_raw = fetch_twitter_results(twitter_queries) if use_api else []
+            twitter_enriched = enrich_row_twitter(idea, twitter_raw, openai_client=openai_client)
+            twitter_enrichments.append(twitter_enriched)
+            print(f"  Twitter: {twitter_enriched.get('enrich_status', 'ok')}")
+        except Exception as e:
+            print(f"  Twitter: error - {e}", file=sys.stderr)
+            twitter_enrichments.append({
+                "row_number": idea.row_number, "content_type": idea.content_type,
+                "topic": idea.topic, "examples": [],
+                "draft_tweet": "", "thread_structure": "",
+                "reference_notes": "", "remix_ideas": "",
+                "enrich_status": "error", "enrich_reason": str(e),
+                "total_results": 0, "scored_results": 0, "queries": [],
+            })
+
+        # --- LinkedIn (LLM-only, no API) ---
+        try:
+            linkedin_queries = generate_linkedin_queries(idea)
+            linkedin_enriched = enrich_row_linkedin(idea, [], openai_client=openai_client)
+            linkedin_enrichments.append(linkedin_enriched)
+            print(f"  LinkedIn: {linkedin_enriched.get('enrich_status', 'ok')}")
+        except Exception as e:
+            print(f"  LinkedIn: error - {e}", file=sys.stderr)
+            linkedin_enrichments.append({
+                "row_number": idea.row_number, "content_type": idea.content_type,
+                "topic": idea.topic, "examples": [],
+                "draft_post": "", "reference_notes": "", "remix_ideas": "",
+                "enrich_status": "error", "enrich_reason": str(e),
+                "total_results": 0, "scored_results": 0, "queries": [],
             })
 
     end_time = time.time()
 
     # Step 7: Compute output path
     if args.output is None:
-        # Derive from input filename
         input_dir = os.path.dirname(args.input) or "."
         input_basename = os.path.basename(args.input)
         input_name, input_ext = os.path.splitext(input_basename)
-        today_str = datetime.date.today().isoformat()
-        output_filename = f"Enriched {input_name}_{today_str}.xlsx"
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        output_filename = f"Enriched {input_name}_{now_str}.xlsx"
         output_path = os.path.join(input_dir, output_filename)
     else:
         output_path = args.output
 
     # Step 8: Write outputs
-    # Write enriched Excel
-    write_enriched_excel(ideas, enrichments, output_path)
+    write_enriched_excel(ideas, tiktok_enrichments, output_path,
+                         twitter_enrichments=twitter_enrichments,
+                         linkedin_enrichments=linkedin_enrichments)
     print(f"\nEnriched Excel written to: {output_path}")
 
     # Build and save run log
-    run_log = build_run_log(ideas, enrichments, args.input, output_path, start_time, end_time)
+    run_log = build_run_log(ideas, tiktok_enrichments, args.input, output_path,
+                            start_time, end_time,
+                            twitter_enrichments=twitter_enrichments,
+                            linkedin_enrichments=linkedin_enrichments)
     log_dir = os.path.dirname(output_path) or "."
-    log_filename = f"run_log_{datetime.date.today().isoformat()}.json"
+    log_filename = f"run_log_{datetime.datetime.now().strftime('%Y-%m-%d_%H%M%S')}.json"
     log_path = os.path.join(log_dir, log_filename)
     save_run_log(run_log, log_path)
     print(f"Run log written to: {log_path}")
 
     # Print summary
     summary = run_log["run_summary"]
-    sc = summary["status_counts"]
-    print(f"\nDone! {summary['total_rows']} rows in {summary['duration_seconds']}s")
-    print(f"  ok: {sc.get('ok', 0)} | partial: {sc.get('partial', 0)} | skipped: {sc.get('skipped', 0)} | error: {sc.get('error', 0)}")
+    tk_sc = summary["tiktok_status_counts"]
+    tw_sc = summary["twitter_status_counts"]
+    li_sc = summary["linkedin_status_counts"]
+    print(f"\nDone! {summary['total_rows']} rows x 3 platforms in {summary['duration_seconds']}s")
+    print(f"  TikTok  - ok: {tk_sc['ok']} | partial: {tk_sc['partial']} | skipped: {tk_sc['skipped']} | error: {tk_sc['error']}")
+    print(f"  Twitter - ok: {tw_sc['ok']} | partial: {tw_sc['partial']} | skipped: {tw_sc['skipped']} | error: {tw_sc['error']}")
+    print(f"  LinkedIn- ok: {li_sc['ok']} | partial: {li_sc['partial']} | skipped: {li_sc['skipped']} | error: {li_sc['error']}")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,6 @@
+.env
+__pycache__/
+Enriched *.xlsx
+run_log_*.json
+~$*.xlsx
+*.pyc
